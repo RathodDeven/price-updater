@@ -1,0 +1,25 @@
+{
+  "alias": [
+    "reference no",
+    "ref no",
+    "item code",
+    "cat.nos",
+    "cat nos"
+  ],
+  "purchase": [
+    "unit mrp",
+    "mrp",
+    "mrp* /unit",
+    "price"
+  ],
+  "particulars": [
+    "description",
+    "particulars",
+    "product description"
+  ],
+  "pack": [
+    "std. pkg. (nos.)",
+    "pack",
+    "nos"
+  ]
+}
