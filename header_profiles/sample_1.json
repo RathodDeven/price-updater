@@ -1,0 +1,53 @@
+{
+  "alias": [
+    "reference",
+    "reference no",
+    "ref no",
+    "ref.",
+    "item code",
+    "code",
+    "product code",
+    "part no",
+    "part number",
+    "article no",
+    "article",
+    "catalog no",
+    "model no",
+    "alias",
+    "sku",
+    "cat.nos",
+    "cat nos"
+  ],
+  "purchase": [
+    "mrp",
+    "unit mrp",
+    "unit price",
+    "price",
+    "purchase",
+    "purchase price",
+    "rate",
+    "net rate",
+    "list price",
+    "mrp* /unit"
+  ],
+  "particulars": [
+    "particular",
+    "particulars",
+    "description",
+    "item description",
+    "product",
+    "material",
+    "name"
+  ],
+  "pack": [
+    "pack",
+    "std pkg",
+    "std. pkg",
+    "std. pkg. (nos.)",
+    "pkg",
+    "pack size",
+    "nos",
+    "uom",
+    "unit"
+  ]
+}

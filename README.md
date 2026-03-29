@@ -33,7 +33,8 @@ Priority order used at runtime:
 
 Meaning:
 - If input PDF is `samples/sinova_catalog.pdf`, script will auto-load `header_profiles/sinova_catalog.json` if it exists.
-- If no per-PDF file exists, script loads `header_profiles/default.json`.
+- If input PDF is `samples/sample_1.pdf`, script will auto-load `header_profiles/sample_1.json` if it exists.
+- If no per-PDF file exists, script loads `header_profiles/default.json` from the configured profile directory.
 - If neither exists, script exits with an error.
 
 Role mapping logic (profile keys):
@@ -92,12 +93,34 @@ So if a row has description but no valid alias or no valid purchase, it will not
 4. Empty spacing between header and rows
 - Handling: empty rows are ignored; only rows with valid values are kept
 
-## Important limitation (current version)
+5. Headerless packed multiline tables
+- Example: one physical row where each cell contains multiple logical values separated by newlines
+- Handling: fallback parser detects alias/price/pack line groups, expands line-wise into normalized rows, and composes particulars per sub-row
 
-Vertical/transposed product tables are not explicitly transposed by dedicated logic yet.
-Depending on extraction output, some transposed layouts may parse partially or be skipped.
+6. Fragmented tables split across multiple extracted matrix rows
+- Example: one logical table appears as multiple sparse rows where columns are broken apart (common in image-heavy layouts)
+- Handling: parser can build a synthetic collapsed row from non-empty column fragments, then extract rows from the reconstructed structure
 
-If you want strict handling for those, next step is to add a transposed-table detector in normalization.
+7. Repeated pack values collapsed into single text runs
+- Example: `1 1 1 1` in one cell instead of one value per line
+- Handling: parser tokenizes grouped pack strings and aligns them to alias/price sequences
+
+8. False alias prevention in mixed text columns
+- Example: `4 module` or `8 way` misread as alias-like tokens
+- Handling: alias detection requires code-like single-token patterns and rejects common unit-style non-codes
+
+## Generalization Rules (No Single-PDF Hardcoding)
+
+The extractor is designed to avoid one-off logic tied to a specific sample PDF.
+
+Rules followed in code:
+- No checks based on specific product families, brand names, or known catalog strings
+- Role mapping is profile-driven (`alias/purchase/particulars/pack` synonyms), not page-id or file-name based
+- Table parsing uses structural signals (line counts, token shapes, proximity, score thresholds), not fixed row positions
+- Fallbacks are deterministic and reusable across vendors
+
+Practical note:
+- Per-PDF header profiles are allowed for synonym tuning, but core extraction logic remains generic.
 
 ## Backend options
 
@@ -124,7 +147,7 @@ GOOGLE_DOCAI_PROCESSOR_VERSION=
 
 ## Why per-client/per-PDF mapping is a good idea
 
-Your intuition is correct: if each client usually keeps a stable catalog format, per-client mapping is cheaper and more stable than LLM inference.
+If each client usually keeps a stable catalog format, per-client mapping is cheaper and more stable than LLM inference.
 
 Recommended strategy:
 1. Keep deterministic mapping as default
@@ -170,24 +193,37 @@ pip install -r requirements.txt
 
 ```bash
 python scripts/extract_price_table.py \
-  --input-pdf ./samples/vendor_catalog.pdf \
-  --output-xlsx ./output/vendor_catalog_prices.xlsx \
+  --input-pdf ./samples/sample_1.pdf \
+  --output-xlsx ./output/sample_1.xlsx \
   --verbose
 ```
 
 Useful options:
-- --backend camelot|docai
-- --header-profile-file /absolute/path/to/profile.json
-- --header-profile-dir ./header_profiles
-- --min-page-score 2
-- --max-pages 20
-- --env-file /path/to/.env
+
+| Option | What it does | Default | Required? |
+|---|---|---|---|
+| `--input-pdf /path/to/file.pdf` | Source PDF to process. | None | **Yes** |
+| `--output-xlsx /path/to/file.xlsx` | Output Excel path for extracted rows. | `output/extracted_prices.xlsx` | No |
+| `--backend camelot\|docai` | Selects extraction backend (`camelot` for native PDFs, `docai` for scanned/complex PDFs). | Uses `EXTRACTION_BACKEND` env var if set, otherwise `camelot` | No |
+| `--header-profile-file /absolute/path/to/profile.json` | Uses this exact header profile file for role mapping. | None (if omitted, auto-lookup is used and falls back to `<header-profile-dir>/default.json`) | No |
+| `--header-profile-dir ./header_profiles` | Directory used for auto profile lookup (`<pdf_stem>.json`, then `default.json`). | `header_profiles` (so fallback is `header_profiles/default.json`) | No |
+| `--min-page-score 2` | Minimum keyword triage score for selecting pages. | `2` | No |
+| `--max-pages 20` | Limits number of candidate pages processed (useful for testing). `0` means no limit. | `0` | No |
+| `--env-file /path/to/.env` | Loads environment variables from a specific `.env` file. | `.env` | No |
+| `--verbose` | Enables debug-level logging and detailed progress logs. | Off | No |
+
+Notes:
+- `--year` is not implemented in the current script.
+- Even though profile flags are optional, a valid header profile must be available at runtime by one of these routes:
+  1. `--header-profile-file`
+  2. `<header-profile-dir>/<input_pdf_stem>.json`
+  3. `<header-profile-dir>/default.json`
 
 ## Where to keep files
 
 - Input PDFs: keep anywhere; pass path in `--input-pdf`.
 - Output Excel: keep anywhere; pass path in `--output-xlsx`.
-- Header profiles: keep in `header_profiles/` for auto-detection.
+- Header profiles: keep in `header_profiles/` for auto-detection. Keep `default.json` there as the baseline fallback profile.
 
 Recommended project layout:
 
@@ -197,12 +233,11 @@ price-updater/
     sinova_catalog.pdf
   header_profiles/
     default.json
-    sinova_catalog.json
   output/
-    sinova_catalog_prices.xlsx
+    sample_1.xlsx
 ```
 
-With that layout, this command auto-loads the profile:
+With that layout, this command uses `header_profiles/default.json` unless `header_profiles/sinova_catalog.json` also exists:
 
 ```bash
 python scripts/extract_price_table.py \

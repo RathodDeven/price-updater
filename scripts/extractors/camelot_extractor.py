@@ -1,10 +1,14 @@
 """Camelot-based table extraction backend (free, for native PDF tables)."""
 
+import logging
 from pathlib import Path
 
 import camelot
 
 from .base import TableExtractor
+
+
+logger = logging.getLogger(__name__)
 
 
 class CamelotExtractor(TableExtractor):
@@ -44,8 +48,15 @@ class CamelotExtractor(TableExtractor):
                         page_result.append(matrix)
                     if page_result:
                         result[page_num] = page_result
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Camelot failed on page %s (index=%s, flavor=%s): %s",
+                    page_num + 1,
+                    page_num,
+                    self.flavor,
+                    exc,
+                )
+                logger.debug("Camelot page failure details", exc_info=True)
 
         return result
 

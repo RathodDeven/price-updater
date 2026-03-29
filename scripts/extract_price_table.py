@@ -124,9 +124,11 @@ def configure_role_synonyms(
     logger.info(f"Profile roles applied: {', '.join(sorted(ACTIVE_ROLE_SYNONYMS.keys()))}")
 
 
-PRICE_PATTERN = re.compile(r"\d{1,3}(?:,\d{2,3})*(?:\.\d+)?|\d+(?:\.\d+)?")
-ALIAS_PATTERN = re.compile(r"^(?=.*\d)[A-Za-z0-9][A-Za-z0-9\-_/\.]{2,}$")
+PRICE_PATTERN = re.compile(r"^(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$")
+ALIAS_PATTERN = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9][A-Za-z0-9\-_/\.]{2,}$")
 PACK_PATTERN = re.compile(r"^[A-Za-z0-9\-_/\.xX]+$")
+PACK_LINE_HINT = re.compile(r"^(?:\d+\s*/\s*\d+|\d+(?:\.\d+)?\s*(?:nos?|pcs?|pc|set|box|pkt|unit|uom))$", re.IGNORECASE)
+NON_ALIAS_UNIT_PATTERN = re.compile(r"^\d+(?:\.\d+)?(?:MA|A|P|V|KV|W|KW|MW|HZ|KA)$", re.IGNORECASE)
 
 
 @dataclass
@@ -191,10 +193,13 @@ def select_candidate_pages(pdf_path: Path, min_score: int = 2) -> tuple[list[int
 
     doc.close()
     candidates = sorted(set(candidates))
-    
+
+    candidate_pages_human = [p + 1 for p in candidates]
+
     logger.info(f"Page triage complete: {len(candidates)} candidate pages out of {len(page_scores)} total")
-    logger.info(f"Candidate page numbers: {candidates}")
-    
+    logger.info(f"Candidate page numbers (0-index): {candidates}")
+    logger.info(f"Candidate page numbers (human): {candidate_pages_human}")
+
     return candidates, page_scores
 
 
@@ -275,11 +280,17 @@ def build_column_mappings(headers: list[str]) -> list[dict[str, int]]:
 def parse_price(value: str) -> float | None:
     if not value:
         return None
-    match = PRICE_PATTERN.search(value.replace(" ", ""))
-    if not match:
+    compact = value.replace(" ", "")
+    if re.search(r"[A-Za-z]", compact):
+        return None
+    normalized = compact.replace(",,", ",")
+    if normalized.endswith(".-"):
+        normalized = normalized[:-2]
+    normalized = normalized.strip(".")
+    if not normalized or not PRICE_PATTERN.fullmatch(normalized):
         return None
     try:
-        return float(match.group(0).replace(",", ""))
+        return float(normalized.replace(",", ""))
     except ValueError:
         return None
 
@@ -302,6 +313,8 @@ def clean_pack(value: str) -> str:
 def looks_like_alias(value: str) -> bool:
     if not value:
         return False
+    if NON_ALIAS_UNIT_PATTERN.match(value):
+        return False
     return bool(ALIAS_PATTERN.match(value))
 
 
@@ -316,6 +329,335 @@ def fallback_particulars(row: list[str], used_indices: set[int]) -> str:
     return max(candidates, key=len)
 
 
+def split_cell_lines(value: str) -> list[str]:
+    return [line.strip() for line in value.splitlines() if line.strip()]
+
+
+def split_pack_tokens(value: str) -> list[str]:
+    tokens: list[str] = []
+    for line in split_cell_lines(value):
+        # Camelot sometimes groups repeated pack values as "1 1 1 1".
+        if re.fullmatch(r"\d+(?:\s+\d+)+", line):
+            tokens.extend(part.strip() for part in line.split() if part.strip())
+        else:
+            tokens.append(line)
+    return tokens
+
+
+def looks_like_alias_line(value: str) -> bool:
+    raw = value.strip()
+    if not raw:
+        return False
+    # Product codes are usually single tokens; values like "4 module"
+    # are description lines and should not be turned into aliases.
+    if re.search(r"\s", raw):
+        return False
+    return looks_like_alias(clean_alias(raw))
+
+
+def is_probable_section_heading(value: str) -> bool:
+    """Detect generic section labels (e.g. product family titles) near data rows."""
+    text = " ".join(value.split()).strip()
+    if not text:
+        return False
+    if looks_like_alias_line(text):
+        return False
+    if parse_price(text) is not None:
+        return False
+
+    words = [w for w in re.split(r"\s+", text) if w]
+    if len(words) < 3:
+        return False
+
+    # Pure alphabetic multi-word lines are usually section headers, not particulars.
+    if all(re.fullmatch(r"[A-Za-z&()'.-]+", w) for w in words):
+        return True
+    return False
+
+
+def extract_alias_entries(value: str) -> list[tuple[str, str]]:
+    """Extract alias lines and nearby contextual particulars from a cell."""
+    lines = split_cell_lines(value)
+    out: list[tuple[str, str]] = []
+
+    for idx, line in enumerate(lines):
+        if not looks_like_alias_line(line):
+            continue
+
+        alias = clean_alias(line)
+        parts: list[str] = []
+        for neighbor_idx in (idx - 1, idx + 1):
+            if neighbor_idx < 0 or neighbor_idx >= len(lines):
+                continue
+            candidate = lines[neighbor_idx].strip()
+            if not candidate:
+                continue
+            if looks_like_alias_line(candidate):
+                continue
+            if is_probable_section_heading(candidate):
+                continue
+            if parse_price(candidate) is not None and not re.search(r"[A-Za-z+/]", candidate):
+                continue
+            if candidate not in parts:
+                parts.append(candidate)
+
+        out.append((alias, " / ".join(parts)))
+
+    return out
+
+
+def line_alias_count(value: str) -> int:
+    lines = split_cell_lines(value)
+    return sum(1 for line in lines if looks_like_alias_line(line))
+
+
+def line_price_count(value: str) -> int:
+    lines = split_cell_lines(value)
+    return sum(1 for line in lines if parse_price(line) is not None)
+
+
+def line_pack_count(value: str) -> int:
+    lines = split_pack_tokens(value)
+    count = 0
+    for line in lines:
+        line = line.strip()
+        if PACK_LINE_HINT.match(line):
+            count += 1
+            continue
+
+        numeric_value = parse_price(line)
+        if numeric_value is not None and numeric_value.is_integer() and 0 < numeric_value <= 100:
+            count += 1
+    return count
+
+
+def collapse_matrix_to_single_row(matrix: list[list[str]]) -> list[str] | None:
+    """Join non-empty column fragments across rows into a synthetic row.
+
+    Some tables are split into multiple horizontal fragments where related
+    columns are distributed over different matrix rows.
+    """
+    if not matrix:
+        return None
+
+    max_cols = max((len(row) for row in matrix), default=0)
+    if max_cols == 0:
+        return None
+
+    non_empty_counts = [sum(1 for cell in row if cell and cell.strip()) for row in matrix]
+    sparse_rows = sum(1 for c in non_empty_counts if c <= 1)
+    # Collapse only when matrix looks vertically fragmented.
+    if len(matrix) < 4 or sparse_rows < 2:
+        return None
+
+    chunks: list[list[str]] = [[] for _ in range(max_cols)]
+    for row in matrix:
+        for idx in range(max_cols):
+            cell = row[idx] if idx < len(row) else ""
+            if cell and cell.strip():
+                chunks[idx].append(cell.strip())
+
+    non_empty_cols = sum(1 for col in chunks if col)
+    if non_empty_cols < 2:
+        return None
+
+    collapsed = ["\n".join(col) if col else "" for col in chunks]
+    if collapsed in matrix:
+        return None
+    return collapsed
+
+
+def pack_column_quality(value: str) -> int:
+    """Score how likely a multiline cell represents package quantities.
+
+    Slash-form values like 1/12 are strongly preferred over plain integers,
+    which may represent current ratings (In A) in some catalogs.
+    """
+    lines = split_pack_tokens(value)
+    if not lines:
+        return 0
+
+    score = 0
+    pack_like = 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        if looks_like_alias_line(line):
+            score -= 4
+            continue
+
+        if re.search(r"[A-Za-z]", line) and "/" not in line:
+            score -= 2
+
+        if "/" in line:
+            score += 5
+            pack_like += 1
+        if PACK_LINE_HINT.match(line):
+            score += 3
+            pack_like += 1
+
+        numeric_value = parse_price(line)
+        if numeric_value is not None and numeric_value.is_integer() and 0 < numeric_value <= 100:
+            if "/" in line:
+                pack_like += 1
+            else:
+                score += 2
+                pack_like += 1
+
+    if lines and (pack_like / len(lines)) >= 0.7:
+        score += 4
+
+    return score
+
+
+def select_pack_column(alias_idx: int, pack_cols: list[int], row: list[str]) -> int | None:
+    if not pack_cols:
+        return None
+
+    def rank(idx: int) -> tuple[int, int, int, int]:
+        return (
+            pack_column_quality(row[idx]),
+            -abs(idx - alias_idx),
+            1 if idx > alias_idx else 0,
+            idx,
+        )
+
+    return max(pack_cols, key=rank)
+
+
+def pack_value_quality(pack: str) -> int:
+    if not pack:
+        return 0
+    if looks_like_alias_line(pack):
+        return -3
+    if "/" in pack:
+        return 3
+    if re.fullmatch(r"\d+", pack):
+        return 2
+    if PACK_PATTERN.fullmatch(pack):
+        return 1
+    return 0
+
+
+def normalized_row_quality(row: NormalizedRow) -> int:
+    return pack_value_quality(row.pack) + (1 if row.particulars else 0)
+
+
+def extract_packed_multiline_rows(matrix: list[list[str]], page_number: int) -> list[NormalizedRow]:
+    """Fallback parser for tables extracted without a header row.
+
+    Some Camelot outputs merge many logical rows into multiline cells. This parser
+    infers alias/price columns per row and expands line-wise values into rows.
+    """
+    normalized: list[NormalizedRow] = []
+
+    rows_to_process = list(matrix)
+    collapsed_row = collapse_matrix_to_single_row(matrix)
+    if collapsed_row is not None:
+        rows_to_process = [collapsed_row] + rows_to_process
+
+    for row in rows_to_process:
+        if not any(cell.strip() for cell in row):
+            continue
+
+        alias_cols = [idx for idx, cell in enumerate(row) if line_alias_count(cell) >= 2]
+        purchase_cols = [
+            idx for idx, cell in enumerate(row) if line_price_count(cell) >= 2 and line_pack_count(cell) < 2
+        ]
+        pack_cols = [idx for idx, cell in enumerate(row) if line_pack_count(cell) >= 2]
+
+        if not alias_cols or not purchase_cols:
+            continue
+
+        pairs: list[tuple[int, int]] = []
+        used_purchase: set[int] = set()
+        for alias_idx in sorted(alias_cols):
+            p_idx = nearest_index(alias_idx, [p for p in purchase_cols if p not in used_purchase])
+            if p_idx is None:
+                continue
+            used_purchase.add(p_idx)
+            pairs.append((alias_idx, p_idx))
+
+        if not pairs:
+            continue
+
+        for alias_idx, purchase_idx in pairs:
+            alias_entries = extract_alias_entries(row[alias_idx])
+            alias_lines = [entry[0] for entry in alias_entries]
+            purchase_lines = split_cell_lines(row[purchase_idx])
+
+            pack_lines: list[str] = []
+            pack_idx = select_pack_column(alias_idx, pack_cols, row)
+            if pack_idx is not None:
+                pack_lines = split_pack_tokens(row[pack_idx])
+
+            # Split non-alias/price/pack text columns into lines so we can
+            # compose per-sub-row particulars from matching line indexes.
+            used_cols = {alias_idx, purchase_idx}
+            if pack_idx is not None:
+                used_cols.add(pack_idx)
+            text_col_lines: list[list[str]] = [
+                split_cell_lines(cell)
+                for idx, cell in enumerate(row)
+                if idx not in used_cols
+                and cell.strip()
+                and line_alias_count(cell) == 0
+                and line_price_count(cell) == 0
+            ]
+
+            max_len = max(len(alias_lines), len(purchase_lines))
+            for i in range(max_len):
+                alias = alias_lines[i] if i < len(alias_lines) else ""
+                alias_particulars = alias_entries[i][1] if i < len(alias_entries) else ""
+                purchase = parse_price(purchase_lines[i]) if i < len(purchase_lines) else None
+                if not looks_like_alias(alias) or purchase is None:
+                    continue
+
+                pack = ""
+                if i < len(pack_lines):
+                    pack = clean_pack(pack_lines[i])
+
+                # For each text column pick the line at position i if available,
+                # otherwise the single value if the column is not multiline.
+                parts: list[str] = []
+                for col_lines in text_col_lines:
+                    if not col_lines:
+                        continue
+                    if i < len(col_lines):
+                        val = col_lines[i].strip()
+                    elif len(col_lines) == 1:
+                        val = col_lines[0].strip()
+                    else:
+                        continue
+                    if val and not PRICE_PATTERN.fullmatch(val.replace(",", "")):
+                        parts.append(val)
+                particulars = " / ".join(parts)
+                if not particulars:
+                    particulars = alias_particulars
+
+                normalized.append(
+                    NormalizedRow(
+                        particulars=particulars,
+                        alias=alias,
+                        purchase=round(purchase, 2),
+                        pack=pack,
+                        source_page=page_number,
+                    )
+                )
+
+    # Keep best candidate per alias+purchase from this fallback pass.
+    best_by_key: dict[tuple[str, float], NormalizedRow] = {}
+    for row in normalized:
+        key = (row.alias, row.purchase)
+        current = best_by_key.get(key)
+        if current is None or normalized_row_quality(row) > normalized_row_quality(current):
+            best_by_key[key] = row
+
+    return list(best_by_key.values())
+
+
 def normalize_rows(matrix: list[list[str]], page_number: int) -> list[NormalizedRow]:
     if len(matrix) < 2:
         return []
@@ -323,7 +665,7 @@ def normalize_rows(matrix: list[list[str]], page_number: int) -> list[Normalized
     headers = first_non_empty_row(matrix)
     mappings = build_column_mappings(headers)
     if not mappings:
-        return []
+        return extract_packed_multiline_rows(matrix, page_number=page_number)
 
     data_rows = matrix[matrix.index(headers) + 1 :]
     normalized: list[NormalizedRow] = []
@@ -362,7 +704,11 @@ def normalize_rows(matrix: list[list[str]], page_number: int) -> list[Normalized
                     source_page=page_number,
                 )
             )
-    return normalized
+
+    if normalized:
+        return normalized
+
+    return extract_packed_multiline_rows(matrix, page_number=page_number)
 
 
 def deduplicate_rows(rows: list[NormalizedRow]) -> list[NormalizedRow]:
@@ -504,13 +850,16 @@ def main() -> None:
     for page_num, tables_on_page in page_tables.items():
         logger.info(f"Processing page {page_num + 1}: found {len(tables_on_page)} table(s)")
         table_count = 0
+        page_rows_extracted = 0
         for matrix in tables_on_page:
             rows_before = len(all_rows)
             all_rows.extend(normalize_rows(matrix, page_number=page_num + 1))
             rows_after = len(all_rows)
             rows_extracted = rows_after - rows_before
             table_count += 1
-            logger.debug(f"  Table {table_count}: extracted {rows_extracted} rows")
+            page_rows_extracted += rows_extracted
+            logger.info(f"  Page {page_num + 1}, table {table_count}: extracted {rows_extracted} row(s)")
+        logger.info(f"Page {page_num + 1}: extracted {page_rows_extracted} row(s) from {table_count} table(s)")
 
     logger.info(f"Total rows extracted (pre-dedup): {len(all_rows)}")
 

@@ -6,3 +6,8 @@ runtime_outputs/
 runtime_tmp/
 .DS_Store
 .pytest_cache/
+
+
+samples and output
+samples/
+output/
