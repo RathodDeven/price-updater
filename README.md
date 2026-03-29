@@ -79,35 +79,71 @@ So if a row has description but no valid alias or no valid purchase, it will not
 
 ## Edge cases currently handled
 
-1. Comparison tables (repeated header blocks)
-- Example: Reference No + Unit MRP repeated twice in one table
-- Handling: script detects multiple alias/purchase columns and creates separate mappings per block
+1. Repeated alias/price blocks in one table row
+- Example: `Reference No.` + `Unit MRP` repeated for WHITE and GREY variants on the same row.
+- Handling: header mapper creates multiple role mappings and pairs each alias column with the nearest purchase column.
 
 2. Header naming variation
-- Example: Ref No, Reference No., Cat.Nos, Item Code, MRP, Unit Price
-- Handling: synonym dictionary + fuzzy matching
+- Example: Ref No, Reference No., Cat.Nos, Item Code, MRP, Unit Price.
+- Handling: profile synonyms + fuzzy scoring for `alias/purchase/particulars/pack` roles.
 
-3. Multiple tables on same page
-- Handling: each table is parsed independently and merged into one output set
+3. Multiple logical sub-tables on one physical page
+- Example: `Switch` block followed by `Sockets` block on the same page.
+- Handling: Camelot auto-mode falls back to `stream` with high `edge_tol` so separated blocks are captured in one pass, then normalized together.
 
-4. Empty spacing between header and rows
-- Handling: empty rows are ignored; only rows with valid values are kept
+4. Empty spacing and decorative rows
+- Example: brand strips, icon rows, blank separators.
+- Handling: rows without required role evidence are ignored.
 
-5. Headerless packed multiline tables
-- Example: one physical row where each cell contains multiple logical values separated by newlines
-- Handling: fallback parser detects alias/price/pack line groups, expands line-wise into normalized rows, and composes particulars per sub-row
+5. Continuation text rows for particulars
+- Example: one row has alias+price, next row has only `(Indicator)` or `(LED Indicator)` in description.
+- Handling: sparse parser merges continuation text into the previous product row before validation.
 
-6. Fragmented tables split across multiple extracted matrix rows
-- Example: one logical table appears as multiple sparse rows where columns are broken apart (common in image-heavy layouts)
-- Handling: parser can build a synthetic collapsed row from non-empty column fragments, then extract rows from the reconstructed structure
+6. Headerless packed multiline tables
+- Example: one physical row where each cell contains multiple logical values separated by newlines.
+- Handling: packed fallback parser expands line groups into row-wise records.
 
-7. Repeated pack values collapsed into single text runs
-- Example: `1 1 1 1` in one cell instead of one value per line
-- Handling: parser tokenizes grouped pack strings and aligns them to alias/price sequences
+7. Fragmented sparse matrices
+- Example: one logical table split into sparse matrix fragments.
+- Handling: parser can collapse fragments into a synthetic row and then apply line-level extraction.
 
-8. False alias prevention in mixed text columns
-- Example: `4 module` or `8 way` misread as alias-like tokens
-- Handling: alias detection requires code-like single-token patterns and rejects common unit-style non-codes
+8. Pack vs purchase ambiguity
+- Example: small integers (10/20) can look like either pack or price in noisy matrices.
+- Handling: role scoring uses numeric distribution and pack-strength evidence (slash forms, token shape, co-occurrence) to prefer stable mappings.
+
+9. False alias prevention
+- Example: `4 module` or `16A` being mistaken for product code.
+- Handling: alias detection enforces code-like token shape and filters unit-like patterns.
+
+10. Duplicate candidate rows from competing parsers
+- Example: sparse parser extracts correct rows, packed parser also emits mismatched alias/price rows.
+- Handling: packed fallback is only used when sparse extraction is weak, and final dedup keeps higher-quality rows per `(alias, purchase)` key.
+
+## How edge-case handling works (step by step)
+
+This is the deterministic decision path used per extracted table matrix:
+
+1. Try header-based mapping first.
+- If strong header roles are found, parse rows directly from mapped columns.
+
+2. If header mapping is weak, run sparse row-wise inference.
+- Infer alias/purchase/pack/particulars columns from value-shape evidence and co-occurrence.
+
+3. Before sparse extraction, merge continuation description rows.
+- Rows with empty alias+purchase but non-empty particulars are appended to the previous row description.
+
+4. Use packed multiline fallback only when sparse evidence is insufficient.
+- Prevents spurious rows when sparse parsing already confidently extracted records.
+
+5. Apply strict row validation.
+- `alias` must be code-like.
+- `purchase` must parse as numeric.
+- Rows failing either rule are skipped.
+
+6. Resolve duplicates by quality.
+- For the same `(alias, purchase)`, keep the row with stronger pack/particulars quality.
+
+This flow is intentionally generic and avoids vendor- or page-specific hardcoding.
 
 ## Generalization Rules (No Single-PDF Hardcoding)
 
@@ -128,6 +164,14 @@ Practical note:
 Best for:
 - native/searchable PDFs
 - clear table lines and structure
+- whitespace/background-separated tables (via auto stream fallback)
+
+Current behavior in this repo:
+- Camelot runs in `auto` mode.
+- It tries `lattice` first.
+- If lattice finds no table (or only very narrow collapsed tables), it falls back to `stream` for that page.
+- Stream fallback uses elevated `edge_tol` to keep section-separated sub-tables on the same page together.
+- Additional structural normalization handles packed multiline rows and fragmented sparse matrices.
 
 Set in .env:
 EXTRACTION_BACKEND=camelot
@@ -136,6 +180,7 @@ EXTRACTION_BACKEND=camelot
 Best for:
 - scanned/image PDFs
 - complex OCR-heavy layouts
+- cases where PDF text extraction quality itself is poor (not just table boundary detection)
 
 Set in .env:
 EXTRACTION_BACKEND=docai
@@ -254,3 +299,14 @@ With --verbose, logs show:
 - page numbers processed
 - tables found per page
 - rows extracted, deduplicated, and final count
+
+## Camelot vs Document AI for Background-Color Separated Tables
+
+Short answer:
+- If the PDF is native/searchable and text is selectable, Camelot can usually handle many background-color separated tables using `stream` parsing and structural normalization.
+- If the PDF is scanned, low-quality, or text ordering is unreliable, Document AI is usually better.
+
+Notes from official docs:
+- Camelot `lattice` is line-based; `stream` is whitespace/text-alignment based.
+- Camelot supports options like `process_background=True`, `edge_tol`, and `row_tol` for difficult layouts.
+- Document AI OCR is designed for complex document layout extraction and scanned documents, with configurable OCR/layout options.

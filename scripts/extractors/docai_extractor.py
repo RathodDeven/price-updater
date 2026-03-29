@@ -34,7 +34,7 @@ class DocumentAIExtractor(TableExtractor):
         self.processor_version = processor_version
         self.client = documentai.DocumentProcessorServiceClient()
 
-    def extract_tables(self, pdf_path: Path, candidate_pages: list[int]) -> dict[int, list[list[str]]]:
+    def extract_tables(self, pdf_path: Path, candidate_pages: list[int]) -> dict[int, list[list[list[str]]]]:
         """Extract tables from candidate pages using Document AI."""
         if self.processor_version:
             processor_name = self.client.processor_version_path(
@@ -43,7 +43,7 @@ class DocumentAIExtractor(TableExtractor):
         else:
             processor_name = self.client.processor_path(self.project_id, self.location, self.processor_id)
 
-        result: dict[int, list[list[str]]] = {}
+        result: dict[int, list[list[list[str]]]] = {}
 
         for page_index in candidate_pages:
             try:
@@ -76,7 +76,7 @@ class DocumentAIExtractor(TableExtractor):
         src = fitz.open(pdf_path)
         single = fitz.open()
         single.insert_pdf(src, from_page=page_index, to_page=page_index)
-        data = single.tobytes(garbage=3, deflate=True)
+        data = single.tobytes(garbage=True, deflate=True)
         single.close()
         src.close()
         return data

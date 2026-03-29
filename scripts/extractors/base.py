@@ -8,7 +8,7 @@ class TableExtractor(ABC):
     """Interface for PDF table extraction backends."""
 
     @abstractmethod
-    def extract_tables(self, pdf_path: Path, candidate_pages: list[int]) -> dict[int, list[list[str]]]:
+    def extract_tables(self, pdf_path: Path, candidate_pages: list[int]) -> dict[int, list[list[list[str]]]]:
         """
         Extract tables from candidate pages in a PDF.
 

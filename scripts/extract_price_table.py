@@ -17,7 +17,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import fitz
 from dotenv import load_dotenv
@@ -169,15 +169,15 @@ def page_score(text: str) -> int:
 
 
 def select_candidate_pages(pdf_path: Path, min_score: int = 2) -> tuple[list[int], dict[int, int]]:
-    doc = fitz.open(pdf_path)
+    doc: Any = fitz.open(pdf_path)
     page_scores: dict[int, int] = {}
     candidates: list[int] = []
 
     logger.info(f"Starting page triage on {pdf_path.name}")
     logger.debug(f"Minimum page score threshold: {min_score}")
 
-    for i, page in enumerate(doc):
-        text = page.get_text("text")
+    for i in range(doc.page_count):
+        text = doc.get_page_text(i)
         score = page_score(text)
         page_scores[i] = score
         if score >= min_score:
@@ -207,7 +207,7 @@ def build_single_page_pdf_bytes(pdf_path: Path, page_index: int) -> bytes:
     src = fitz.open(pdf_path)
     single = fitz.open()
     single.insert_pdf(src, from_page=page_index, to_page=page_index)
-    data = single.tobytes(garbage=3, deflate=True)
+    data = single.tobytes(garbage=True, deflate=True)
     single.close()
     src.close()
     return data
@@ -658,6 +658,230 @@ def extract_packed_multiline_rows(matrix: list[list[str]], page_number: int) -> 
     return list(best_by_key.values())
 
 
+def infer_sparse_row_mappings(matrix: list[list[str]]) -> list[dict[str, int]]:
+    """Infer column roles from cell distributions when header mapping is weak."""
+    if not matrix:
+        return []
+
+    max_cols = max((len(row) for row in matrix), default=0)
+    if max_cols == 0:
+        return []
+
+    alias_scores = [0] * max_cols
+    purchase_scores = [0] * max_cols
+    pack_scores = [0] * max_cols
+    particulars_scores = [0] * max_cols
+    numeric_values_by_col: list[list[float]] = [[] for _ in range(max_cols)]
+    text_richness_scores = [0] * max_cols
+    pack_strength_scores = [0] * max_cols
+
+    for row in matrix:
+        for idx in range(max_cols):
+            cell = row[idx] if idx < len(row) else ""
+            value = " ".join(cell.split()).strip()
+            if not value:
+                continue
+
+            if looks_like_alias_line(value):
+                alias_scores[idx] += 1
+                continue
+
+            parsed_numeric = parse_price(value)
+            if parsed_numeric is not None:
+                purchase_scores[idx] += 1
+                numeric_values_by_col[idx].append(parsed_numeric)
+
+            if clean_pack(value):
+                pack_scores[idx] += 1
+
+                if re.fullmatch(r"\d+\s*/\s*\d+", value):
+                    pack_strength_scores[idx] += 4
+                elif re.fullmatch(r"\d+", value):
+                    pack_strength_scores[idx] += 3
+                elif re.search(r"[A-Za-z]", value):
+                    pack_strength_scores[idx] -= 2
+
+            if parsed_numeric is None and re.search(r"[A-Za-z]", value):
+                particulars_scores[idx] += 1
+                text_richness_scores[idx] += len(re.findall(r"[A-Za-z]", value))
+
+    alias_cols = [i for i, s in enumerate(alias_scores) if s >= 3]
+    purchase_cols: list[int] = []
+    for i, s in enumerate(purchase_scores):
+        if s < 3:
+            continue
+        nums = numeric_values_by_col[i]
+        if nums:
+            small_ratio = sum(1 for n in nums if n.is_integer() and 0 < n <= 100) / len(nums)
+            # Columns dominated by small integers are often pack columns.
+            if small_ratio >= 0.7:
+                continue
+        purchase_cols.append(i)
+    pack_cols = [i for i, s in enumerate(pack_scores) if s >= 3]
+    particulars_cols = [i for i, s in enumerate(particulars_scores) if s >= 3]
+
+    mappings: list[dict[str, int]] = []
+    used_purchase: set[int] = set()
+
+    def alias_price_cooccurrence(alias_idx: int, purchase_idx: int) -> int:
+        count = 0
+        for row in matrix:
+            alias_cell = row[alias_idx] if alias_idx < len(row) else ""
+            purchase_cell = row[purchase_idx] if purchase_idx < len(row) else ""
+            if looks_like_alias_line(alias_cell.strip()) and parse_price(purchase_cell.strip()) is not None:
+                count += 1
+        return count
+
+    def pack_cooccurrence(alias_idx: int, purchase_idx: int, pack_idx: int) -> int:
+        count = 0
+        for row in matrix:
+            alias_cell = row[alias_idx] if alias_idx < len(row) else ""
+            purchase_cell = row[purchase_idx] if purchase_idx < len(row) else ""
+            pack_cell = row[pack_idx] if pack_idx < len(row) else ""
+            if (
+                looks_like_alias_line(alias_cell.strip())
+                and parse_price(purchase_cell.strip()) is not None
+                and clean_pack(pack_cell.strip())
+            ):
+                count += 1
+        return count
+
+    for alias_idx in alias_cols:
+        available_purchase = [p for p in purchase_cols if p not in used_purchase]
+        if not available_purchase:
+            continue
+
+        scored_purchase = sorted(
+            available_purchase,
+            key=lambda p: (alias_price_cooccurrence(alias_idx, p), -abs(p - alias_idx), 1 if p > alias_idx else 0, p),
+            reverse=True,
+        )
+        p_idx = scored_purchase[0] if scored_purchase else None
+        if p_idx is None:
+            continue
+        purchase_idx = p_idx
+        if alias_price_cooccurrence(alias_idx, purchase_idx) < 3:
+            continue
+        used_purchase.add(purchase_idx)
+
+        mapping = {"alias": alias_idx, "purchase": purchase_idx}
+
+        candidate_pack_cols = [c for c in pack_cols if c != alias_idx and c != purchase_idx]
+        if candidate_pack_cols:
+            scored_pack = sorted(
+                candidate_pack_cols,
+                key=lambda c: (
+                    pack_strength_scores[c],
+                    pack_cooccurrence(alias_idx, purchase_idx, c),
+                    1 if c > purchase_idx else 0,
+                    -abs(c - purchase_idx),
+                    c,
+                ),
+                reverse=True,
+            )
+            pack_idx = scored_pack[0] if scored_pack else None
+            if pack_idx is not None:
+                mapping["pack"] = pack_idx
+
+        candidate_part_cols = [c for c in particulars_cols if c != alias_idx and c != purchase_idx]
+        if candidate_part_cols:
+            scored_parts = sorted(
+                candidate_part_cols,
+                key=lambda c: (
+                    text_richness_scores[c],
+                    particulars_scores[c],
+                    -abs(c - alias_idx),
+                    c,
+                ),
+                reverse=True,
+            )
+            part_idx = scored_parts[0] if scored_parts else None
+            if part_idx is not None and abs(part_idx - alias_idx) <= 4:
+                mapping["particulars"] = part_idx
+
+        mappings.append(mapping)
+
+    return mappings
+
+
+def extract_sparse_rowwise_rows(matrix: list[list[str]], page_number: int) -> list[NormalizedRow]:
+    """Parse row-wise sparse tables where cell backgrounds separate columns."""
+    mappings = infer_sparse_row_mappings(matrix)
+    if not mappings:
+        return []
+
+    # Merge continuation rows into the preceding data row's particulars column.
+    # A continuation row has all alias+purchase columns empty but has text in the
+    # particulars column (e.g. "(Indicator)" split onto its own row by Camelot).
+    alias_cols_set = {m["alias"] for m in mappings}
+    purchase_cols_set = {m["purchase"] for m in mappings}
+    particulars_col: int | None = next(
+        (m["particulars"] for m in mappings if "particulars" in m), None
+    )
+
+    working_matrix: list[list[str]] = []
+    for row in matrix:
+        if not any(cell.strip() for cell in row):
+            continue
+        is_continuation = (
+            particulars_col is not None
+            and particulars_col < len(row)
+            and row[particulars_col].strip()
+            and all((row[c] if c < len(row) else "").strip() == "" for c in alias_cols_set | purchase_cols_set)
+        )
+        if is_continuation and working_matrix:
+            prev = list(working_matrix[-1])
+            part_idx = particulars_col
+            if part_idx is not None and part_idx < len(prev):
+                prev[part_idx] = prev[part_idx] + " " + row[part_idx].strip()
+                working_matrix[-1] = prev
+        else:
+            working_matrix.append(list(row))
+
+    out: list[NormalizedRow] = []
+    for row in working_matrix:
+
+        for mapping in mappings:
+            alias_raw = row[mapping["alias"]].strip() if mapping["alias"] < len(row) else ""
+            purchase_raw = row[mapping["purchase"]].strip() if mapping["purchase"] < len(row) else ""
+
+            alias = clean_alias(alias_raw)
+            purchase = parse_price(purchase_raw)
+            if not looks_like_alias(alias) or purchase is None:
+                continue
+
+            pack = ""
+            if "pack" in mapping and mapping["pack"] < len(row):
+                pack = clean_pack(row[mapping["pack"]])
+
+            particulars = ""
+            if "particulars" in mapping and mapping["particulars"] < len(row):
+                particulars = " ".join(row[mapping["particulars"]].split()).strip()
+            if not particulars:
+                used = {mapping["alias"], mapping["purchase"]}
+                if "pack" in mapping:
+                    used.add(mapping["pack"])
+                particulars = fallback_particulars(row, used)
+
+            out.append(
+                NormalizedRow(
+                    particulars=particulars,
+                    alias=alias,
+                    purchase=round(purchase, 2),
+                    pack=pack,
+                    source_page=page_number,
+                )
+            )
+
+    best_by_key: dict[tuple[str, float], NormalizedRow] = {}
+    for row in out:
+        key = (row.alias, row.purchase)
+        current = best_by_key.get(key)
+        if current is None or normalized_row_quality(row) > normalized_row_quality(current):
+            best_by_key[key] = row
+    return list(best_by_key.values())
+
+
 def normalize_rows(matrix: list[list[str]], page_number: int) -> list[NormalizedRow]:
     if len(matrix) < 2:
         return []
@@ -665,7 +889,19 @@ def normalize_rows(matrix: list[list[str]], page_number: int) -> list[Normalized
     headers = first_non_empty_row(matrix)
     mappings = build_column_mappings(headers)
     if not mappings:
-        return extract_packed_multiline_rows(matrix, page_number=page_number)
+        sparse_rows = extract_sparse_rowwise_rows(matrix, page_number=page_number)
+        # Only run packed multiline fallback when sparse finds nothing — otherwise
+        # the packed parser can misread image-label rows and emit rows with wrong
+        # purchase prices that create spurious extra entries (different dedup key).
+        packed_rows = [] if len(sparse_rows) >= 3 else extract_packed_multiline_rows(matrix, page_number=page_number)
+
+        best_by_key: dict[tuple[str, float], NormalizedRow] = {}
+        for row in sparse_rows + packed_rows:
+            key = (row.alias, row.purchase)
+            current = best_by_key.get(key)
+            if current is None or normalized_row_quality(row) > normalized_row_quality(current):
+                best_by_key[key] = row
+        return list(best_by_key.values())
 
     data_rows = matrix[matrix.index(headers) + 1 :]
     normalized: list[NormalizedRow] = []
@@ -708,19 +944,26 @@ def normalize_rows(matrix: list[list[str]], page_number: int) -> list[Normalized
     if normalized:
         return normalized
 
-    return extract_packed_multiline_rows(matrix, page_number=page_number)
+    sparse_rows = extract_sparse_rowwise_rows(matrix, page_number=page_number)
+    packed_rows = extract_packed_multiline_rows(matrix, page_number=page_number)
+
+    best_by_key: dict[tuple[str, float], NormalizedRow] = {}
+    for row in sparse_rows + packed_rows:
+        key = (row.alias, row.purchase)
+        current = best_by_key.get(key)
+        if current is None or normalized_row_quality(row) > normalized_row_quality(current):
+            best_by_key[key] = row
+    return list(best_by_key.values())
 
 
 def deduplicate_rows(rows: list[NormalizedRow]) -> list[NormalizedRow]:
-    seen: set[tuple[str, float]] = set()
-    out: list[NormalizedRow] = []
+    best_by_key: dict[tuple[str, float], NormalizedRow] = {}
     for row in rows:
         key = (row.alias, row.purchase)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(row)
-    return out
+        current = best_by_key.get(key)
+        if current is None or normalized_row_quality(row) > normalized_row_quality(current):
+            best_by_key[key] = row
+    return list(best_by_key.values())
 
 
 def export_xlsx(rows: list[NormalizedRow], output_path: Path) -> None:
@@ -741,7 +984,7 @@ def get_extractor(backend: str, env: dict[str, str], verbose: bool = False) -> T
 
     if backend == "camelot":
         logger.info("Initializing Camelot extractor (free, for native PDFs)")
-        return CamelotExtractor(flavor="lattice")
+        return CamelotExtractor(flavor="auto")
 
     elif backend == "docai":
         logger.info("Initializing Document AI extractor (paid, for scanned/complex PDFs)")
