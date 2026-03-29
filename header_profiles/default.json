@@ -23,12 +23,14 @@
     "unit mrp",
     "unit price",
     "price",
+    "₹",
     "purchase",
     "purchase price",
     "rate",
     "net rate",
     "list price",
-    "mrp* /unit"
+    "mrp* /unit",
+    "unit lp"
   ],
   "particulars": [
     "particular",
@@ -46,46 +48,6 @@
     "std. pkg. (nos.)",
     "pkg",
     "pack size",
-    "nos",
-    "uom",
-    "unit"
-  ],
-  "triage": {
-    "role_weights": {
-      "alias": 2,
-      "purchase": 3,
-      "particulars": 2,
-      "pack": 2
-    },
-    "role_markers": {
-      "alias": [
-        "reference",
-        "reference no",
-        "ref no",
-        "item code",
-        "cat.nos",
-        "cat nos",
-        "part no"
-      ],
-      "purchase": [
-        "unit mrp",
-        "mrp",
-        "unit price",
-        "list price",
-        "mrp* /unit"
-      ],
-      "particulars": [
-        "description",
-        "particulars",
-        "item description"
-      ],
-      "pack": [
-        "std pkg",
-        "std. pkg",
-        "std. pkg. (nos.)",
-        "pack",
-        "nos"
-      ]
-    }
-  }
+    "uom"
+  ]
 }

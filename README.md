@@ -6,11 +6,18 @@ Primary script:
 - scripts/extract_price_table.py
 
 Output columns:
-- particulars (description, if available)
 - alias (product id / reference no / item code)
 - purchase (MRP / unit price)
-- pack (optional)
 - source_page
+
+Default output is intentionally minimal for performance on large catalogs:
+- `alias`
+- `purchase`
+- `source_page`
+
+Optional columns can be enabled with CLI flags:
+- `--include-particulars`
+- `--include-pack`
 
 ## Is any LLM used?
 
@@ -21,6 +28,8 @@ Current flow is fully deterministic:
 2. Table extraction backend (Camelot or Document AI)
 3. Header-to-role mapping with synonym + fuzzy matching
 4. Row validation and export
+
+The pipeline also supports page-level parallel processing for faster runs on large PDFs.
 
 ## Edge-Case Summary (Quick)
 
@@ -58,12 +67,41 @@ Role mapping logic (profile keys):
 - `particulars`: description equivalents
 - `pack`: pack equivalents
 
-Then each extracted row is normalized to output columns:
-- `particulars`
+Page triage now reuses the same role synonym lists from the active profile for marker checks.
+This keeps triage and extraction aligned and avoids maintaining a separate
+`triage.role_markers` list in profile JSON.
+
+Default role weights for triage are centralized in `scripts/core/config.py`
+(`DEFAULT_TRIAGE_ROLE_WEIGHTS`). Optional profile override is still supported
+via `triage.role_weights`.
+
+Weight precedence at runtime:
+1. Start from `DEFAULT_TRIAGE_ROLE_WEIGHTS` in `scripts/core/config.py`
+2. If the active profile JSON has `triage.role_weights`, those role values override defaults for that run
+
+Example optional override in a profile:
+
+```json
+{
+  "triage": {
+    "role_weights": {
+      "alias": 2,
+      "purchase": 3,
+      "particulars": 2,
+      "pack": 2
+    }
+  }
+}
+```
+
+Then each extracted row is normalized with mandatory fields:
 - `alias`
 - `purchase`
-- `pack`
 - `source_page`
+
+Optional fields (disabled by default):
+- `particulars` (`--include-particulars`)
+- `pack` (`--include-pack`)
 
 Example profile file:
 
@@ -92,132 +130,33 @@ Validation details:
 
 So if a row has description but no valid alias or no valid purchase, it will not be exported.
 
-## Edge Cases Currently Handled (Detailed)
+## Edge Cases Currently Handled
 
-1. Repeated alias/price blocks in one table row
-- Example: `Reference No.` + `Unit MRP` repeated for WHITE and GREY variants on the same row.
-- Handling: header mapper creates multiple role mappings and pairs each alias column with the nearest purchase column.
+The extractor currently handles these generic table patterns:
 
-2. Header naming variation
-- Example: Ref No, Reference No., Cat.Nos, Item Code, MRP, Unit Price.
-- Handling: profile synonyms + fuzzy scoring for `alias/purchase/particulars/pack` roles.
-
+1. Repeated alias and price blocks in one table row
+2. Header naming variation across vendors and catalogs
 3. Multiple logical sub-tables on one physical page
-- Example: `Switch` block followed by `Sockets` block on the same page.
-- Handling: Camelot auto-mode falls back to `stream` with high `edge_tol` so separated blocks are captured in one pass, then normalized together.
-
-4. Empty spacing and decorative rows
-- Example: brand strips, icon rows, blank separators.
-- Handling: rows without required role evidence are ignored.
-
-5. Continuation text rows for particulars
-- Example: one row has alias+price, next row has only `(Indicator)` or `(LED Indicator)` in description.
-- Handling: sparse parser merges continuation text into the previous product row before validation.
-
+4. Empty, decorative, or spacing rows
+5. Continuation rows for particulars/description text
 6. Headerless packed multiline tables
-- Example: one physical row where each cell contains multiple logical values separated by newlines.
-- Handling: packed fallback parser expands line groups into row-wise records.
-
 7. Fragmented sparse matrices
-- Example: one logical table split into sparse matrix fragments.
-- Handling: parser can collapse fragments into a synthetic row and then apply line-level extraction.
-
 8. Pack vs purchase ambiguity
-- Example: small integers (10/20) can look like either pack or price in noisy matrices.
-- Handling: role scoring uses numeric distribution and pack-strength evidence (slash forms, token shape, co-occurrence) to prefer stable mappings.
+9. False alias prevention for non-code tokens
+10. Split multi-row headers with bullets or labels above the table
+11. Pole labels leaking into alias candidates
+12. Duplicate candidate rows from competing parsers
+13. Shared purchase columns across multiple reference columns
+14. Compact horizontal tables collapsed into one dense text column
+15. Reference codes with raised footnote markers
+16. Two-column catalog spreads where repeated Cat.Nos and MRP/Unit headers appear lower on the page and item grids begin after intervening text/feature blocks
+17. Vertical dense-column tables where alias and purchase are stacked in one merged text column and pack appears in a nearby column
+18. Compact vertical blocks where Cat.Nos is separate but MRP and Pack are stacked line-wise in one column
+19. Flattened accessory matrices where repeated Cat.Nos MRP pairs appear as token streams in one row/cell
 
-9. False alias prevention
-- Example: `4 module` or `16A` being mistaken for product code.
-- Handling: alias detection enforces code-like token shape and filters unit-like patterns.
+This also covers mixed rows where several Cat.Nos are listed first but only the last one or two have visible MRP values (for example some variants are price-on-request while later variants have explicit MRP).
 
-10. Duplicate candidate rows from competing parsers
-- Example: sparse parser extracts correct rows, packed parser also emits mismatched alias/price rows.
-- Handling: packed fallback is only used when sparse extraction is weak, and final dedup keeps higher-quality rows per `(alias, purchase)` key.
-
-11. Shared purchase column across multiple reference columns
-- Example: two adjacent reference columns share one purchase column, while a later reference column maps to a later purchase column.
-- Handling: both header-based and sparse inference mapping allow purchase-column reuse when reference columns outnumber purchase columns, so each reference gets its own row even when sharing price.
-- Generic behavior: does not depend on color labels (WHITE/GREY/BLACK); it relies on column structure and proximity.
-
-12. Compact horizontal tables collapsed into one dense text column
-- Example: horizontal layout extracted by Camelot as one column where each cell contains multiline aliases/prices/role labels.
-- Handling: compact-horizontal parser pairs `Reference No.` rows with following `Unit MRP` rows and expands line-wise aliases/prices.
-
-## Edge-Case Handling Details (By Case)
-
-1. Repeated alias/price blocks in one table row
-- Detection: multiple columns score strongly for `alias` and `purchase` in the same header band.
-- Handling: create multiple mappings and pair nearest role columns per block.
-
-2. Header naming variation
-- Detection: fuzzy scoring against profile synonyms.
-- Handling: profile-driven role mapping (`alias/purchase/particulars/pack`) with fallback thresholds.
-
-3. Multiple logical sub-tables on one page
-- Detection: extractor returns separate matrices for one PDF page.
-- Handling: normalize each matrix independently, then merge and deduplicate.
-
-4. Decorative/spacing rows
-- Detection: rows lacking valid alias+purchase evidence.
-- Handling: skip early before normalization output.
-
-5. Continuation particulars rows
-- Detection: alias/purchase columns empty while particulars column has text.
-- Handling: append continuation text to previous row particulars.
-
-6. Headerless packed multiline matrices
-- Detection: multiline cells with repeated alias/price line signals.
-- Handling: expand lines into logical rows and align by line index.
-
-7. Fragmented sparse matrices
-- Detection: sparse row occupancy with split column fragments.
-- Handling: optionally collapse fragments into synthetic row, then parse.
-
-8. Pack vs price ambiguity
-- Detection: columns dominated by small integers or mixed token shapes.
-- Handling: pack-strength scoring (slash forms, hints, co-occurrence) to prefer stable pack mapping.
-
-9. False alias prevention
-- Detection: token shape checks and unit-like regex guards.
-- Handling: reject non-code-like values from alias role.
-
-10. Cross-parser duplicate candidates
-- Detection: same logical row emitted by competing fallback paths.
-- Handling: quality-ranked dedup by `(alias, purchase)`, then alias uniqueness layer.
-
-11. Shared purchase columns for multiple references
-- Detection: alias/reference columns outnumber purchase columns in the same structure.
-- Handling: allow purchase-column reuse (nearest mapping) in header and sparse inference so all references produce rows with shared purchase where applicable.
-
-12. Compact horizontal single-column collapse
-- Detection: role markers and multiline alias/price sequences inside one dominant column.
-- Handling: pair reference-role rows with following purchase-role rows and expand aliases/prices line-wise.
-
-## How edge-case handling works (step by step)
-
-This is the deterministic decision path used per extracted table matrix:
-
-1. Try header-based mapping first.
-- If strong header roles are found, parse rows directly from mapped columns.
-
-2. If header mapping is weak, run sparse row-wise inference.
-- Infer alias/purchase/pack/particulars columns from value-shape evidence and co-occurrence.
-
-3. Before sparse extraction, merge continuation description rows.
-- Rows with empty alias+purchase but non-empty particulars are appended to the previous row description.
-
-4. Use packed multiline fallback only when sparse evidence is insufficient.
-- Prevents spurious rows when sparse parsing already confidently extracted records.
-
-5. Apply strict row validation.
-- `alias` must be code-like.
-- `purchase` must parse as numeric.
-- Rows failing either rule are skipped.
-
-6. Resolve duplicates by quality.
-- For the same `(alias, purchase)`, keep the row with stronger pack/particulars quality.
-
-This flow is intentionally generic and avoids vendor- or page-specific hardcoding.
+Implementation details for each case are documented in [docs/edge-cases.md](docs/edge-cases.md).
 
 ## Generalization Rules (No Single-PDF Hardcoding)
 
@@ -317,6 +256,18 @@ python scripts/extract_price_table.py \
   --verbose
 ```
 
+Default run above extracts only `alias`, `purchase`, and `source_page`.
+
+To include optional fields:
+
+```bash
+python scripts/extract_price_table.py \
+  --input-pdf ./samples/sample_1.pdf \
+  --output-xlsx ./output/sample_1_full.xlsx \
+  --include-particulars \
+  --include-pack
+```
+
 Useful options:
 
 | Option | What it does | Default | Required? |
@@ -329,6 +280,8 @@ Useful options:
 | `--min-page-score 2` | Minimum keyword triage score for selecting pages. | `2` | No |
 | `--max-pages 20` | Limits number of candidate pages processed (useful for testing). `0` means no limit. | `0` | No |
 | `--triage-keywords-file /path/to/weights.json` | Optional JSON to extend/override page triage keyword weights for different catalog vocabularies. | None | No |
+| `--include-particulars` | Also extracts/exports `particulars`. Disabled by default to reduce compute. | Off | No |
+| `--include-pack` | Also extracts/exports `pack`. Disabled by default to reduce compute. | Off | No |
 | `--env-file /path/to/.env` | Loads environment variables from a specific `.env` file. | `.env` | No |
 | `--verbose` | Enables debug-level logging and detailed progress logs. | Off | No |
 
@@ -338,6 +291,44 @@ Notes:
   1. `--header-profile-file`
   2. `<header-profile-dir>/<input_pdf_stem>.json`
   3. `<header-profile-dir>/default.json`
+
+## Parallel Processing for Large PDFs
+
+Parallel behavior is configured centrally in `scripts/core/config.py` via defaults, and can be overridden by environment variables.
+
+Default knobs in code:
+- `DEFAULT_PARALLEL_ENABLED = True`
+- `DEFAULT_EXTRACTION_MODE = process`
+- `DEFAULT_EXTRACTION_WORKERS = min(16, cpu_count)`
+- `DEFAULT_NORMALIZATION_MODE = off`
+- `DEFAULT_NORMALIZATION_WORKERS = min(16, cpu_count)`
+- `DEFAULT_MIN_PAGES_FOR_PARALLEL = 8`
+
+Environment overrides (set in `.env`):
+- `PARALLEL_PROCESSING_ENABLED=true|false`
+- `PARALLEL_EXTRACTION_MODE=thread|process`
+- `PARALLEL_EXTRACTION_WORKERS=<int>`
+- `PARALLEL_NORMALIZATION_MODE=thread|process|off`
+- `PARALLEL_NORMALIZATION_WORKERS=<int>`
+- `PARALLEL_MIN_PAGES=<int>`
+
+Example for a 300-page catalog:
+
+```bash
+PARALLEL_PROCESSING_ENABLED=true
+PARALLEL_EXTRACTION_MODE=process
+PARALLEL_EXTRACTION_WORKERS=16
+PARALLEL_NORMALIZATION_MODE=off
+PARALLEL_NORMALIZATION_WORKERS=16
+PARALLEL_MIN_PAGES=8
+```
+
+Notes:
+- Parallelization is page-level (tables/pages are still parsed deterministically).
+- For very small inputs, processing stays effectively sequential due to the minimum-page threshold.
+- `PARALLEL_EXTRACTION_MODE=process` can outperform threads on some CPUs because Camelot work is CPU-heavy.
+- Normalization is usually lightweight; `PARALLEL_NORMALIZATION_MODE=off` is often fastest unless row volumes are very high.
+- Current implementation uses CPU parallelism only. No GPU acceleration is used by Camelot, PyMuPDF, or the normalization logic.
 
 ## Quick Testing with `--target-page`
 
@@ -354,6 +345,36 @@ python scripts/extract_price_table.py \
 - Use this to iterate quickly on specific tables without reprocessing entire PDF
 - Overrides page triage; extracts even if page wouldn't normally be selected
 
+## Regression Testing
+
+Run the full test suite:
+
+```bash
+pytest -q
+```
+
+If you are using the project virtual environment explicitly:
+
+```bash
+./.venv/bin/pytest -q
+```
+
+Run only the page-regression and workbook-truth tests:
+
+```bash
+pytest -q tests/test_target_page_regressions.py tests/test_full_workbook_regression.py
+```
+
+Locked truth-workbook regressions are included for `sample_2.pdf` and `sample_3.pdf`:
+
+- Truth files:
+  - `tests/truth/sample_2_truth.xlsx`
+  - `tests/truth/sample_3_truth.xlsx`
+- Test module:
+  - `tests/test_full_workbook_regression.py`
+
+These tests run a fresh extraction and compare the full `(alias, purchase, source_page)` output against the locked workbook rows to catch parser regressions early.
+
 ## Code Structure & Modularity
 
 The extraction script is organized into focused, reusable modules for maintainability and readability.
@@ -368,6 +389,7 @@ Each module in `scripts/core/` is focused on a single responsibility and kept un
 | `parsing.py` | Price/alias/pack validation and cleaning | `parse_price()`, `clean_alias()`, `looks_like_alias()` |
 | `text_utils.py` | Text cleaning, splitting, extraction | `split_cell_lines()`, `extract_alias_entries()`, `fallback_particulars()` |
 | `quality_scoring.py` | Quality metrics for ranking rows/columns | `pack_column_quality()`, `normalized_row_quality()`, `select_pack_column()` |
+| `role_markers.py` | Shared role marker matching from active profile synonyms | `has_role_marker()`, `infer_role_from_label()` |
 | `header.py` | Header role detection and column mapping | `build_column_mappings()`, `infer_sparse_row_mappings()` |
 | `table_analysis.py` | Layout detection (horizontal vs vertical tables) | `extract_horizontal_table_rows()` |
 | `normalization.py` | Main row extraction & layout dispatch | `normalize_rows()`, `extract_packed_multiline_rows()`, `extract_sparse_rowwise_rows()` |

@@ -11,13 +11,15 @@ Pipeline:
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import logging
 import os
 from pathlib import Path
+import time
 
 from dotenv import load_dotenv
 
-from core.config import configure_role_synonyms
+from core.config import configure_role_synonyms, load_parallel_processing_config
 from core.deduplication import deduplicate_rows
 from core.export import export_xlsx
 from core.normalization import normalize_rows
@@ -32,13 +34,51 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _process_page_tables(
+    page_num: int,
+    tables_on_page: list[list[list[str]]],
+    include_particulars: bool,
+    include_pack: bool,
+) -> tuple[int, list, list[int]]:
+    page_rows: list = []
+    per_table_counts: list[int] = []
+    for matrix in tables_on_page:
+        extracted = normalize_rows(
+            matrix,
+            page_number=page_num + 1,
+            include_particulars=include_particulars,
+            include_pack=include_pack,
+        )
+        page_rows.extend(extracted)
+        per_table_counts.append(len(extracted))
+    return page_num, page_rows, per_table_counts
+
+
+def _format_seconds(seconds: float) -> str:
+    """Format elapsed seconds for human-readable logs."""
+    if seconds < 60:
+        return f"{seconds:.2f}s"
+    minutes, rem = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)}m {rem:.2f}s"
+    hours, rem_minutes = divmod(int(minutes), 60)
+    return f"{hours}h {rem_minutes}m {rem:.2f}s"
+
+
 def get_extractor(backend: str, env: dict[str, str], verbose: bool = False) -> TableExtractor:
     """Factory to create the appropriate table extractor backend."""
     backend = backend.lower()
 
     if backend == "camelot":
+        parallel = load_parallel_processing_config(env)
         logger.info("Initializing Camelot extractor (free, for native PDFs)")
-        return CamelotExtractor(flavor="auto")
+        return CamelotExtractor(
+            flavor="auto",
+            parallel_enabled=parallel.enabled,
+            extraction_mode=parallel.extraction_mode,
+            max_workers=parallel.extraction_workers,
+            min_pages_for_parallel=parallel.min_pages_for_parallel,
+        )
 
     elif backend == "docai":
         logger.info("Initializing Document AI extractor (paid, for scanned/complex PDFs)")
@@ -64,7 +104,9 @@ def get_extractor(backend: str, env: dict[str, str], verbose: bool = False) -> T
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description="Extract alias, purchase, particulars, and pack from PDF tables.")
+    parser = argparse.ArgumentParser(
+        description="Extract alias/purchase rows from PDF tables (particulars/pack optional)."
+    )
     parser.add_argument("--env-file", default=".env", type=Path, help="Path to .env file (default: .env)")
     parser.add_argument("--input-pdf", required=True, type=Path, help="Path to source PDF")
     parser.add_argument(
@@ -101,6 +143,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional JSON file to extend/override page triage keyword weights.",
     )
+    parser.add_argument(
+        "--include-particulars",
+        action="store_true",
+        help="Also extract and export particulars column. Off by default for faster runs.",
+    )
+    parser.add_argument(
+        "--include-pack",
+        action="store_true",
+        help="Also extract and export pack column. Off by default for faster runs.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Print progress details")
     return parser.parse_args()
 
@@ -108,6 +160,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """Main extraction pipeline."""
     args = parse_args()
+    run_start = time.perf_counter()
 
     # Set verbose mode
     if args.verbose:
@@ -141,14 +194,26 @@ def main() -> None:
 
     env = dict(os.environ)
     extractor = get_extractor(backend, env, verbose=args.verbose)
+    parallel_cfg = load_parallel_processing_config(env)
+    logger.info(
+        "Parallel config: enabled=%s extraction_mode=%s extraction_workers=%s normalization_mode=%s normalization_workers=%s min_pages=%s",
+        parallel_cfg.enabled,
+        parallel_cfg.extraction_mode,
+        parallel_cfg.extraction_workers,
+        parallel_cfg.normalization_mode,
+        parallel_cfg.normalization_workers,
+        parallel_cfg.min_pages_for_parallel,
+    )
 
     logger.info("Starting page triage...")
+    triage_start = time.perf_counter()
     keyword_weights = load_keyword_weights(args.triage_keywords_file)
     candidate_pages, scores = select_candidate_pages(
         args.input_pdf,
         min_score=args.min_page_score,
         keyword_weights=keyword_weights,
     )
+    logger.info("Page triage duration: %s", _format_seconds(time.perf_counter() - triage_start))
 
     if args.max_pages > 0:
         original_count = len(candidate_pages)
@@ -167,33 +232,82 @@ def main() -> None:
 
     logger.info(f"Total pages to process: {len(candidate_pages)}")
     logger.info("Extracting tables from candidate pages...")
+    logger.info(
+        "Enabled optional fields: particulars=%s, pack=%s",
+        "on" if args.include_particulars else "off",
+        "on" if args.include_pack else "off",
+    )
 
     all_rows = []
+    extraction_start = time.perf_counter()
     page_tables = extractor.extract_tables(args.input_pdf, candidate_pages)
+    logger.info("Table extraction duration: %s", _format_seconds(time.perf_counter() - extraction_start))
 
     logger.info(f"Tables extracted from {len(page_tables)} pages")
+    normalization_start = time.perf_counter()
 
-    for page_num, tables_on_page in page_tables.items():
-        logger.info(f"Processing page {page_num + 1}: found {len(tables_on_page)} table(s)")
-        table_count = 0
-        page_rows_extracted = 0
-        for matrix in tables_on_page:
-            rows_before = len(all_rows)
-            all_rows.extend(normalize_rows(matrix, page_number=page_num + 1))
-            rows_after = len(all_rows)
-            rows_extracted = rows_after - rows_before
-            table_count += 1
-            page_rows_extracted += rows_extracted
-            logger.info(f"  Page {page_num + 1}, table {table_count}: extracted {rows_extracted} row(s)")
-        logger.info(f"Page {page_num + 1}: extracted {page_rows_extracted} row(s) from {table_count} table(s)")
+    page_items = sorted(page_tables.items(), key=lambda x: x[0])
+    should_parallelize_normalization = (
+        parallel_cfg.enabled
+        and parallel_cfg.normalization_mode != "off"
+        and parallel_cfg.normalization_workers > 1
+        and len(page_items) >= parallel_cfg.min_pages_for_parallel
+    )
+    logger.info(
+        "Normalization parallelization: %s (mode=%s pages=%s threshold=%s)",
+        "on" if should_parallelize_normalization else "off",
+        parallel_cfg.normalization_mode if should_parallelize_normalization else "off",
+        len(page_items),
+        parallel_cfg.min_pages_for_parallel,
+    )
+
+    page_results: list[tuple[int, list, list[int]]] = []
+    if should_parallelize_normalization:
+        executor_cls = ThreadPoolExecutor if parallel_cfg.normalization_mode == "thread" else ProcessPoolExecutor
+        with executor_cls(max_workers=parallel_cfg.normalization_workers) as executor:
+            futures = [
+                executor.submit(
+                    _process_page_tables,
+                    page_num,
+                    tables,
+                    args.include_particulars,
+                    args.include_pack,
+                )
+                for page_num, tables in page_items
+            ]
+            for future in as_completed(futures):
+                page_results.append(future.result())
+        page_results.sort(key=lambda x: x[0])
+    else:
+        for page_num, tables_on_page in page_items:
+            page_results.append(
+                _process_page_tables(
+                    page_num,
+                    tables_on_page,
+                    args.include_particulars,
+                    args.include_pack,
+                )
+            )
+
+    for page_num, page_rows, per_table_counts in page_results:
+        logger.info(f"Processing page {page_num + 1}: found {len(per_table_counts)} table(s)")
+        for table_idx, rows_extracted in enumerate(per_table_counts, start=1):
+            logger.info(f"  Page {page_num + 1}, table {table_idx}: extracted {rows_extracted} row(s)")
+        logger.info(
+            f"Page {page_num + 1}: extracted {sum(per_table_counts)} row(s) from {len(per_table_counts)} table(s)"
+        )
+        all_rows.extend(page_rows)
+    logger.info("Row normalization duration: %s", _format_seconds(time.perf_counter() - normalization_start))
 
     logger.info(f"Total rows extracted (pre-dedup): {len(all_rows)}")
 
     if all_rows:
         logger.info("Deduplicating rows...")
+        dedup_start = time.perf_counter()
         final_rows = deduplicate_rows(all_rows)
         duplicate_count = len(all_rows) - len(final_rows)
         logger.info(f"Removed {duplicate_count} duplicate rows")
+        logger.info("Deduplication duration: %s", _format_seconds(time.perf_counter() - dedup_start))
     else:
         logger.warning("No rows were extracted!")
         final_rows = []
@@ -202,7 +316,14 @@ def main() -> None:
 
     args.output_xlsx.parent.mkdir(parents=True, exist_ok=True)
     logger.info(f"Writing output to: {args.output_xlsx}")
-    export_xlsx(final_rows, args.output_xlsx)
+    export_start = time.perf_counter()
+    export_xlsx(
+        final_rows,
+        args.output_xlsx,
+        include_particulars=args.include_particulars,
+        include_pack=args.include_pack,
+    )
+    logger.info("Export duration: %s", _format_seconds(time.perf_counter() - export_start))
 
     logger.info("=" * 80)
     logger.info("EXTRACTION COMPLETE")
@@ -210,6 +331,7 @@ def main() -> None:
     logger.info(f"  Extracted rows (pre-dedup): {len(all_rows)}")
     logger.info(f"  Final rows: {len(final_rows)}")
     logger.info(f"  Output file: {args.output_xlsx}")
+    logger.info("  Total runtime: %s", _format_seconds(time.perf_counter() - run_start))
     logger.info("=" * 80)
 
 

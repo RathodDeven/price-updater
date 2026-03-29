@@ -26,13 +26,8 @@ ACTIVE_ROLE_SYNONYMS: dict[str, list[str]] = {
     "pack": [],
 }
 
-# Active triage configuration (loaded from profile if provided).
-ACTIVE_TRIAGE_ROLE_WEIGHTS: dict[str, int] = {
-    "alias": 2,
-    "purchase": 3,
-    "pack": 2,
-    "particulars": 2,
-}
+# Active triage configuration (loaded during startup).
+ACTIVE_TRIAGE_ROLE_WEIGHTS: dict[str, int] = {}
 
 ACTIVE_TRIAGE_ROLE_MARKERS: dict[str, list[str]] = {
     "alias": [],

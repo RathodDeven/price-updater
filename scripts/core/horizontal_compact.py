@@ -6,16 +6,8 @@ import re
 
 from core.models import NormalizedRow
 from core.parsing import clean_alias, clean_pack, looks_like_alias, parse_price
+from core.role_markers import has_role_marker
 from core.text_utils import split_cell_lines
-
-REFERENCE_MARKERS = ("reference", "ref no", "item code", "cat.no")
-PURCHASE_MARKERS = ("unit mrp", "mrp", "unit price", "price")
-PACK_MARKERS = ("std. pkg", "std pkg", "pack", "nos")
-
-
-def _has_any_marker(text: str, markers: tuple[str, ...]) -> bool:
-    lower = text.lower()
-    return any(marker in lower for marker in markers)
 
 
 def _dominant_column(matrix: list[list[str]]) -> int | None:
@@ -40,7 +32,7 @@ def _extract_aliases(lines: list[str]) -> list[str]:
     seen: set[str] = set()
 
     for line in lines:
-        if _has_any_marker(line, REFERENCE_MARKERS):
+        if has_role_marker(line, "alias", include_role_name=True):
             continue
 
         # Handle both one-token and space-separated alias groups.
@@ -57,8 +49,7 @@ def _extract_aliases(lines: list[str]) -> list[str]:
 def _extract_ref_labels(lines: list[str]) -> list[str]:
     labels: list[str] = []
     for line in lines:
-        lower = line.lower()
-        if _has_any_marker(lower, REFERENCE_MARKERS):
+        if has_role_marker(line, "alias", include_role_name=True):
             continue
         if parse_price(line) is not None:
             continue
@@ -69,7 +60,11 @@ def _extract_ref_labels(lines: list[str]) -> list[str]:
     return labels
 
 
-def _extract_purchase_pack_labels(lines: list[str]) -> tuple[list[float], list[str], list[str]]:
+def _extract_purchase_pack_labels(
+    lines: list[str],
+    include_pack: bool,
+    include_particulars: bool,
+) -> tuple[list[float], list[str], list[str]]:
     prices: list[float] = []
     packs: list[str] = []
     labels: list[str] = []
@@ -81,27 +76,33 @@ def _extract_purchase_pack_labels(lines: list[str]) -> tuple[list[float], list[s
         if not stripped:
             continue
 
-        if _has_any_marker(lower, PURCHASE_MARKERS):
+        if has_role_marker(lower, "purchase", include_role_name=True):
             continue
 
-        if _has_any_marker(lower, PACK_MARKERS):
+        if include_pack and has_role_marker(lower, "pack", include_role_name=True):
             pack_section = True
             continue
 
         parsed = parse_price(stripped)
         if parsed is not None:
-            if pack_section and parsed.is_integer() and 0 < parsed <= 100:
+            if include_pack and pack_section and parsed.is_integer() and 0 < parsed <= 100:
                 packs.append(clean_pack(str(int(parsed))))
             else:
                 prices.append(parsed)
             continue
 
-        labels.append(stripped)
+        if include_particulars:
+            labels.append(stripped)
 
     return prices, packs, labels
 
 
-def extract_compact_horizontal_rows(matrix: list[list[str]], page_number: int) -> list[NormalizedRow]:
+def extract_compact_horizontal_rows(
+    matrix: list[list[str]],
+    page_number: int,
+    include_particulars: bool = False,
+    include_pack: bool = False,
+) -> list[NormalizedRow]:
     """Extract rows from compact horizontal layout collapsed into one text column.
 
     Camelot can collapse some horizontal tables into a single dense text column,
@@ -127,22 +128,26 @@ def extract_compact_horizontal_rows(matrix: list[list[str]], page_number: int) -
     out: list[NormalizedRow] = []
 
     for idx, (_, text) in enumerate(role_rows):
-        if not _has_any_marker(text, REFERENCE_MARKERS):
+        if not has_role_marker(text, "alias", include_role_name=True):
             continue
 
         if idx + 1 >= len(role_rows):
             continue
 
         _, next_text = role_rows[idx + 1]
-        if not _has_any_marker(next_text, PURCHASE_MARKERS):
+        if not has_role_marker(next_text, "purchase", include_role_name=True):
             continue
 
         ref_lines = split_cell_lines(text)
         purchase_lines = split_cell_lines(next_text)
 
         aliases = _extract_aliases(ref_lines)
-        prices, packs, purchase_labels = _extract_purchase_pack_labels(purchase_lines)
-        ref_labels = _extract_ref_labels(ref_lines)
+        prices, packs, purchase_labels = _extract_purchase_pack_labels(
+            purchase_lines,
+            include_pack=include_pack,
+            include_particulars=include_particulars,
+        )
+        ref_labels = _extract_ref_labels(ref_lines) if include_particulars else []
 
         if not aliases or not prices:
             continue
@@ -154,14 +159,17 @@ def extract_compact_horizontal_rows(matrix: list[list[str]], page_number: int) -
         if row_count == 0:
             continue
 
-        particulars = " ".join(part for part in (ref_labels + purchase_labels) if part).strip()
+        particulars = ""
+        if include_particulars:
+            particulars = " ".join(part for part in (ref_labels + purchase_labels) if part).strip()
 
         for item_idx in range(row_count):
             pack = ""
-            if len(packs) == row_count:
-                pack = packs[item_idx]
-            elif len(packs) == 1:
-                pack = packs[0]
+            if include_pack:
+                if len(packs) == row_count:
+                    pack = packs[item_idx]
+                elif len(packs) == 1:
+                    pack = packs[0]
 
             out.append(
                 NormalizedRow(

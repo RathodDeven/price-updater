@@ -9,6 +9,7 @@ from rapidfuzz import fuzz
 
 from core.models import ACTIVE_ROLE_SYNONYMS
 from core.parsing import clean_pack, looks_like_alias_line, parse_price
+from core.role_markers import has_role_marker
 from core.text_utils import normalize_header
 
 
@@ -38,10 +39,67 @@ def first_non_empty_row(matrix: list[list[str]]) -> list[str]:
     return []
 
 
+def detect_header_row_index(matrix: list[list[str]], scan_rows: int = 12) -> int:
+    """Pick the best header anchor row among the first rows of a table.
+
+    Many catalogs place bullet text or section labels above the table. This
+    function scores candidate rows after header enrichment and prefers rows
+    that strongly match alias/purchase header roles.
+    """
+    if not matrix:
+        return 0
+
+    limit = min(len(matrix), max(1, scan_rows))
+    best_idx = 0
+    best_score = -1
+
+    for row_idx in range(limit):
+        base = matrix[row_idx]
+        if not any(cell.strip() for cell in base):
+            continue
+
+        non_empty = sum(1 for cell in base if cell.strip())
+        if non_empty < 2:
+            continue
+
+        enriched = enrich_header_row(matrix, base_row_idx=row_idx, base_headers=base)
+        if not enriched:
+            continue
+
+        alias_best = max((header_role_score(h, "alias") for h in enriched), default=0)
+        purchase_best = max((header_role_score(h, "purchase") for h in enriched), default=0)
+        particulars_best = max((header_role_score(h, "particulars") for h in enriched), default=0)
+        pack_best = max((header_role_score(h, "pack") for h in enriched), default=0)
+
+        role_hits = sum(
+            1
+            for s in (alias_best, purchase_best, particulars_best, pack_best)
+            if s >= 70
+        )
+
+        # Prioritize alias+purchase confidence; use role coverage and column
+        # density as tie-breakers.
+        score = (alias_best + purchase_best) * 3 + (particulars_best + pack_best) + role_hits * 80 + non_empty * 5
+
+        if score > best_score:
+            best_score = score
+            best_idx = row_idx
+
+    # Fall back to first non-empty row when all candidates are weak.
+    if best_score < 0:
+        for idx, row in enumerate(matrix):
+            if any(cell.strip() for cell in row):
+                return idx
+        return 0
+
+    return best_idx
+
+
 def enrich_header_row(
     matrix: list[list[str]],
     base_row_idx: int,
     base_headers: list[str],
+    lookback_rows: int = 1,
     lookahead_rows: int = 2,
 ) -> list[str]:
     """Combine neighboring header rows into a richer per-column header string.
@@ -57,16 +115,23 @@ def enrich_header_row(
         return base_headers
 
     enriched: list[str] = []
+    start_row = max(0, base_row_idx - lookback_rows)
     end_row = min(len(matrix), base_row_idx + lookahead_rows + 1)
 
     for col_idx in range(max_cols):
         parts: list[str] = []
-        for row_idx in range(base_row_idx, end_row):
+        for row_idx in range(start_row, end_row):
             row = matrix[row_idx]
             if col_idx >= len(row):
                 continue
             cell = " ".join(row[col_idx].split()).strip()
-            if cell and cell not in parts:
+            if not cell:
+                continue
+            if row_idx < base_row_idx and not any(
+                has_role_marker(cell, role, include_role_name=True) for role in ACTIVE_ROLE_SYNONYMS
+            ):
+                continue
+            if cell not in parts:
                 parts.append(cell)
         enriched.append(" ".join(parts).strip())
 
@@ -84,6 +149,25 @@ def nearest_index(target: int, choices: Iterable[int]) -> int | None:
     return min(choices_list, key=lambda x: abs(x - target))
 
 
+def has_alias_header_evidence(header: str) -> bool:
+    """Return True when a header has alias evidence from active profile."""
+    return has_role_marker(header, "alias", include_role_name=True)
+
+
+def has_purchase_header_evidence(header: str) -> bool:
+    """Return True when a header has purchase evidence from active profile."""
+    return has_role_marker(header, "purchase", include_role_name=True)
+
+
+def has_pack_header_evidence(header: str) -> bool:
+    """Return True when a header has pack evidence but is not an alias header."""
+    return (
+        has_role_marker(header, "pack", include_role_name=True)
+        and not has_alias_header_evidence(header)
+        and not has_purchase_header_evidence(header)
+    )
+
+
 def build_column_mappings(headers: list[str]) -> list[dict[str, int]]:
     """Build column role mappings from headers using fuzzy matching.
     
@@ -97,14 +181,28 @@ def build_column_mappings(headers: list[str]) -> list[dict[str, int]]:
         role: [header_role_score(h, role) for h in headers] for role in ACTIVE_ROLE_SYNONYMS
     }
 
-    alias_cols = [i for i, s in enumerate(scores_by_role["alias"]) if s >= 70]
-    purchase_cols = [i for i, s in enumerate(scores_by_role["purchase"]) if s >= 70]
+    alias_cols = [
+        i
+        for i, s in enumerate(scores_by_role["alias"])
+        if s >= 70
+        and s >= scores_by_role["particulars"][i] + 8
+        and not (scores_by_role["pack"][i] >= 90 and scores_by_role["pack"][i] > s)
+    ]
+    purchase_cols = [
+        i
+        for i, s in enumerate(scores_by_role["purchase"])
+        if s >= 70 and i not in alias_cols
+    ]
     particulars_cols = [i for i, s in enumerate(scores_by_role["particulars"]) if s >= 70]
     pack_cols = [
         i
         for i, s in enumerate(scores_by_role["pack"])
-        if s >= 70 and any(token in normalize_header(headers[i]) for token in ("pack", "pkg", "nos", "uom"))
+        if s >= 70 and has_pack_header_evidence(headers[i])
     ]
+
+    purchase_evidence_cols = [i for i in purchase_cols if has_purchase_header_evidence(headers[i])]
+    if purchase_evidence_cols:
+        purchase_cols = purchase_evidence_cols
 
     mappings: list[dict[str, int]] = []
 
@@ -112,7 +210,8 @@ def build_column_mappings(headers: list[str]) -> list[dict[str, int]]:
     # purchase columns (e.g. white+grey share one MRP column, black has another).
     if len(alias_cols) >= 2 and len(purchase_cols) >= 1:
         used_purchase: set[int] = set()
-        for alias_idx in sorted(alias_cols):
+        sorted_alias_cols = sorted(alias_cols)
+        for idx, alias_idx in enumerate(sorted_alias_cols):
             # If aliases outnumber purchase columns, allow reuse of nearest
             # purchase column so multiple color variants can share the same MRP.
             if len(alias_cols) > len(purchase_cols):
@@ -134,7 +233,13 @@ def build_column_mappings(headers: list[str]) -> list[dict[str, int]]:
 
             mapping = {"alias": alias_idx, "purchase": p_idx}
             part_idx = nearest_index(alias_idx, particulars_cols)
-            pack_idx = nearest_index(alias_idx, pack_cols)
+            next_alias_idx = sorted_alias_cols[idx + 1] if idx + 1 < len(sorted_alias_cols) else None
+            block_pack_cols = [
+                pack_idx
+                for pack_idx in pack_cols
+                if pack_idx >= alias_idx and (next_alias_idx is None or pack_idx < next_alias_idx)
+            ]
+            pack_idx = nearest_index(p_idx, block_pack_cols) or nearest_index(alias_idx, pack_cols)
             if part_idx is not None and abs(part_idx - alias_idx) <= 4:
                 mapping["particulars"] = part_idx
             if pack_idx is not None and (
@@ -147,9 +252,20 @@ def build_column_mappings(headers: list[str]) -> list[dict[str, int]]:
         return mappings
 
     # Single mapping case
-    alias_best = max(range(len(headers)), key=lambda i: scores_by_role["alias"][i])
-    purchase_best = max(range(len(headers)), key=lambda i: scores_by_role["purchase"][i])
-    if scores_by_role["alias"][alias_best] < 60 or scores_by_role["purchase"][purchase_best] < 60:
+    alias_evidence_cols = [i for i, h in enumerate(headers) if has_alias_header_evidence(h)]
+    purchase_evidence_cols = [i for i, h in enumerate(headers) if has_purchase_header_evidence(h)]
+
+    alias_pool = alias_evidence_cols if alias_evidence_cols else list(range(len(headers)))
+    purchase_pool = purchase_evidence_cols if purchase_evidence_cols else list(range(len(headers)))
+
+    alias_best = max(alias_pool, key=lambda i: scores_by_role["alias"][i])
+    purchase_best = max(purchase_pool, key=lambda i: scores_by_role["purchase"][i])
+    alias_min_score = 45 if has_alias_header_evidence(headers[alias_best]) else 60
+    purchase_min_score = 35 if has_purchase_header_evidence(headers[purchase_best]) else 60
+    if scores_by_role["alias"][alias_best] < alias_min_score or scores_by_role["purchase"][purchase_best] < purchase_min_score:
+        return []
+
+    if alias_best == purchase_best:
         return []
 
     mapping = {"alias": alias_best, "purchase": purchase_best}

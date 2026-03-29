@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from extract_price_table import parse_price
+from core.parsing import parse_price
 
 
 def test_parse_price_keeps_four_digit_values() -> None:

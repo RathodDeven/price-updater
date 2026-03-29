@@ -54,6 +54,9 @@ Repository agent rules for `price-updater`.
   - packed multiline fallback
   - fragmented table fallback
 - Confirm no regressions in previously fixed pages.
+- Run all tests before concluding changes:
+  - `pytest -q`
+  - or `./.venv/bin/pytest -q`
 
 ## Supported Table Layouts
 1. **Vertical Standard**: Headers in first row, product rows below (classic)
