@@ -22,6 +22,21 @@ Current flow is fully deterministic:
 3. Header-to-role mapping with synonym + fuzzy matching
 4. Row validation and export
 
+## Edge-Case Summary (Quick)
+
+- Repeated alias/price header blocks on one row
+- Header naming variation across vendors
+- Multiple sub-tables on one page
+- Decorative/spacing rows between products
+- Continuation particulars rows
+- Headerless packed multiline matrices
+- Fragmented sparse matrix rows
+- Pack vs price ambiguity in small integers
+- False alias rejection (unit-like tokens)
+- Cross-parser duplicate candidate rows
+- Shared purchase column across multiple reference columns
+- Compact horizontal tables collapsed into one dense text column
+
 ## How per-PDF header mapping works
 
 The script now supports manual per-PDF header profiles.
@@ -77,7 +92,7 @@ Validation details:
 
 So if a row has description but no valid alias or no valid purchase, it will not be exported.
 
-## Edge cases currently handled
+## Edge Cases Currently Handled (Detailed)
 
 1. Repeated alias/price blocks in one table row
 - Example: `Reference No.` + `Unit MRP` repeated for WHITE and GREY variants on the same row.
@@ -118,6 +133,65 @@ So if a row has description but no valid alias or no valid purchase, it will not
 10. Duplicate candidate rows from competing parsers
 - Example: sparse parser extracts correct rows, packed parser also emits mismatched alias/price rows.
 - Handling: packed fallback is only used when sparse extraction is weak, and final dedup keeps higher-quality rows per `(alias, purchase)` key.
+
+11. Shared purchase column across multiple reference columns
+- Example: two adjacent reference columns share one purchase column, while a later reference column maps to a later purchase column.
+- Handling: both header-based and sparse inference mapping allow purchase-column reuse when reference columns outnumber purchase columns, so each reference gets its own row even when sharing price.
+- Generic behavior: does not depend on color labels (WHITE/GREY/BLACK); it relies on column structure and proximity.
+
+12. Compact horizontal tables collapsed into one dense text column
+- Example: horizontal layout extracted by Camelot as one column where each cell contains multiline aliases/prices/role labels.
+- Handling: compact-horizontal parser pairs `Reference No.` rows with following `Unit MRP` rows and expands line-wise aliases/prices.
+
+## Edge-Case Handling Details (By Case)
+
+1. Repeated alias/price blocks in one table row
+- Detection: multiple columns score strongly for `alias` and `purchase` in the same header band.
+- Handling: create multiple mappings and pair nearest role columns per block.
+
+2. Header naming variation
+- Detection: fuzzy scoring against profile synonyms.
+- Handling: profile-driven role mapping (`alias/purchase/particulars/pack`) with fallback thresholds.
+
+3. Multiple logical sub-tables on one page
+- Detection: extractor returns separate matrices for one PDF page.
+- Handling: normalize each matrix independently, then merge and deduplicate.
+
+4. Decorative/spacing rows
+- Detection: rows lacking valid alias+purchase evidence.
+- Handling: skip early before normalization output.
+
+5. Continuation particulars rows
+- Detection: alias/purchase columns empty while particulars column has text.
+- Handling: append continuation text to previous row particulars.
+
+6. Headerless packed multiline matrices
+- Detection: multiline cells with repeated alias/price line signals.
+- Handling: expand lines into logical rows and align by line index.
+
+7. Fragmented sparse matrices
+- Detection: sparse row occupancy with split column fragments.
+- Handling: optionally collapse fragments into synthetic row, then parse.
+
+8. Pack vs price ambiguity
+- Detection: columns dominated by small integers or mixed token shapes.
+- Handling: pack-strength scoring (slash forms, hints, co-occurrence) to prefer stable pack mapping.
+
+9. False alias prevention
+- Detection: token shape checks and unit-like regex guards.
+- Handling: reject non-code-like values from alias role.
+
+10. Cross-parser duplicate candidates
+- Detection: same logical row emitted by competing fallback paths.
+- Handling: quality-ranked dedup by `(alias, purchase)`, then alias uniqueness layer.
+
+11. Shared purchase columns for multiple references
+- Detection: alias/reference columns outnumber purchase columns in the same structure.
+- Handling: allow purchase-column reuse (nearest mapping) in header and sparse inference so all references produce rows with shared purchase where applicable.
+
+12. Compact horizontal single-column collapse
+- Detection: role markers and multiline alias/price sequences inside one dominant column.
+- Handling: pair reference-role rows with following purchase-role rows and expand aliases/prices line-wise.
 
 ## How edge-case handling works (step by step)
 
@@ -254,6 +328,7 @@ Useful options:
 | `--header-profile-dir ./header_profiles` | Directory used for auto profile lookup (`<pdf_stem>.json`, then `default.json`). | `header_profiles` (so fallback is `header_profiles/default.json`) | No |
 | `--min-page-score 2` | Minimum keyword triage score for selecting pages. | `2` | No |
 | `--max-pages 20` | Limits number of candidate pages processed (useful for testing). `0` means no limit. | `0` | No |
+| `--triage-keywords-file /path/to/weights.json` | Optional JSON to extend/override page triage keyword weights for different catalog vocabularies. | None | No |
 | `--env-file /path/to/.env` | Loads environment variables from a specific `.env` file. | `.env` | No |
 | `--verbose` | Enables debug-level logging and detailed progress logs. | Off | No |
 
@@ -263,6 +338,74 @@ Notes:
   1. `--header-profile-file`
   2. `<header-profile-dir>/<input_pdf_stem>.json`
   3. `<header-profile-dir>/default.json`
+
+## Quick Testing with `--target-page`
+
+To extract a single page quickly (useful for debugging):
+
+```bash
+python scripts/extract_price_table.py \
+  --input-pdf ./samples/sample_2.pdf \
+  --target-page 6 \
+  --output-xlsx ./output/page6_test.xlsx
+```
+
+- `--target-page` is 1-indexed (6 = page 6 in human numbering)
+- Use this to iterate quickly on specific tables without reprocessing entire PDF
+- Overrides page triage; extracts even if page wouldn't normally be selected
+
+## Code Structure & Modularity
+
+The extraction script is organized into focused, reusable modules for maintainability and readability.
+
+### `scripts/core/` — Core Extraction Logic
+
+Each module in `scripts/core/` is focused on a single responsibility and kept under ~200 lines for readability:
+
+| Module | Responsibility | Key Exports |
+|--------|---|---|
+| `models.py` | Data structures, constants, regex patterns | `NormalizedRow`, `KEYWORD_WEIGHTS`, `ACTIVE_ROLE_SYNONYMS` |
+| `parsing.py` | Price/alias/pack validation and cleaning | `parse_price()`, `clean_alias()`, `looks_like_alias()` |
+| `text_utils.py` | Text cleaning, splitting, extraction | `split_cell_lines()`, `extract_alias_entries()`, `fallback_particulars()` |
+| `quality_scoring.py` | Quality metrics for ranking rows/columns | `pack_column_quality()`, `normalized_row_quality()`, `select_pack_column()` |
+| `header.py` | Header role detection and column mapping | `build_column_mappings()`, `infer_sparse_row_mappings()` |
+| `table_analysis.py` | Layout detection (horizontal vs vertical tables) | `extract_horizontal_table_rows()` |
+| `normalization.py` | Main row extraction & layout dispatch | `normalize_rows()`, `extract_packed_multiline_rows()`, `extract_sparse_rowwise_rows()` |
+| `deduplication.py` | Two-layer row deduplication (by price, then by alias) | `deduplicate_rows()` |
+| `export.py` | Excel output | `export_xlsx()` |
+| `config.py` | Profile loading & role configuration | `load_profile()`, `configure_role_synonyms()` |
+| `page_triage.py` | PDF page scoring & candidate selection | `page_score()`, `select_candidate_pages()` |
+
+### `scripts/extract_price_table.py` — CLI Entry Point
+
+- Thin entry point (~150 lines)
+- Parses CLI arguments → orchestrates core modules → writes output
+- No extraction logic; delegates to `core/normalization.py`, etc.
+
+### `scripts/extractors/` — Backend Plugins
+
+- `base.py`: TableExtractor interface
+- `camelot_extractor.py`: Free native PDF extraction
+- `docai_extractor.py`: Paid Google Document AI OCR
+
+### Dependency Flow
+
+```
+models.py  ←  (all modules depend on constants/types)
+↓
+parsing.py, text_utils.py  ←  (foundational utilities)
+↓
+quality_scoring.py  ←  (uses parsing, text_utils)
+header.py  ←  (uses parsing, quality_scoring, text_utils)
+table_analysis.py  ←  (uses parsing)
+↓
+normalization.py  ←  (orchestrates all: header, table_analysis, quality_scoring)
+deduplication.py  ←  (uses quality_scoring)
+↓
+extract_price_table.py  ←  (imports: config, normalization, dedup, export)
+```
+
+**No circular imports**: dependency graph is acyclic.
 
 ## Where to keep files
 
