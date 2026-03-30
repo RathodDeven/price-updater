@@ -23,3 +23,12 @@ def test_extract_alias_accepts_spaced_numeric_catalog_numbers_when_allowed() -> 
 
 def test_extract_alias_does_not_concatenate_multiline_numeric_aliases() -> None:
     assert extract_alias("0281 32\n0281 34", allow_numeric=True) == "028132"
+
+
+def test_extract_alias_strips_flattened_numeric_footnote_suffix() -> None:
+    assert extract_alias("4122 761", allow_numeric=True) == "412276"
+    assert extract_alias("4122 571", allow_numeric=True) == "412257"
+
+
+def test_extract_alias_keeps_regular_spaced_numeric_codes() -> None:
+    assert extract_alias("4122 270", allow_numeric=True) == "4122270"

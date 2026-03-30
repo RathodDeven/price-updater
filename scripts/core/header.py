@@ -23,11 +23,25 @@ def header_role_score(header: str, role: str) -> int:
         return 0
 
     best = 0
+    norm_words = set(normalized.split())
     for synonym in ACTIVE_ROLE_SYNONYMS[role]:
         synonym_n = normalize_header(synonym)
-        if synonym_n in normalized:
+        syn_words = synonym_n.split()
+        # Whole-word containment: every word in the synonym must appear as a
+        # whole word in the header (prevents "rate" matching "rated").
+        if all(w in norm_words for w in syn_words):
             best = max(best, 100)
-        best = max(best, int(fuzz.partial_ratio(normalized, synonym_n)))
+        raw = int(fuzz.partial_ratio(normalized, synonym_n))
+        # Penalize fuzzy matches when the header is much shorter than the
+        # synonym — a 1-char header like "a" (from "(A)") matching
+        # "purchase" with a high partial_ratio is noise, not signal.
+        if len(normalized) < len(synonym_n) and len(normalized) < 3:
+            raw = min(raw, len(normalized) * 20)
+        # Cap fuzzy-only matches (no whole-word hit) that score very high —
+        # prevents prefix overlaps like "rated" ↔ "rate" from scoring 100.
+        if raw >= 85 and not all(w in norm_words for w in syn_words):
+            raw = min(raw, 70)
+        best = max(best, raw)
     return best
 
 
@@ -62,7 +76,10 @@ def detect_header_row_index(matrix: list[list[str]], scan_rows: int = 12) -> int
         if non_empty < 2:
             continue
 
-        enriched = enrich_header_row(matrix, base_row_idx=row_idx, base_headers=base)
+        # lookahead_rows=0: only look backwards during detection to prevent
+        # an early row inheriting role evidence from the actual header row
+        # below it, which would cause the wrong anchor row to be selected.
+        enriched = enrich_header_row(matrix, base_row_idx=row_idx, base_headers=base, lookback_rows=1, lookahead_rows=0)
         if not enriched:
             continue
 
@@ -78,10 +95,11 @@ def detect_header_row_index(matrix: list[list[str]], scan_rows: int = 12) -> int
         )
 
         # Prioritize alias+purchase confidence; use role coverage and column
-        # density as tie-breakers.
+        # density as tie-breakers. Prefer earlier rows on near-ties since
+        # catalog headers are at the top.
         score = (alias_best + purchase_best) * 3 + (particulars_best + pack_best) + role_hits * 80 + non_empty * 5
 
-        if score > best_score:
+        if score > best_score + 10 or (score >= best_score and row_idx <= best_idx):
             best_score = score
             best_idx = row_idx
 
@@ -99,7 +117,7 @@ def enrich_header_row(
     matrix: list[list[str]],
     base_row_idx: int,
     base_headers: list[str],
-    lookback_rows: int = 1,
+    lookback_rows: int = 4,
     lookahead_rows: int = 2,
 ) -> list[str]:
     """Combine neighboring header rows into a richer per-column header string.
@@ -188,6 +206,10 @@ def build_column_mappings(headers: list[str]) -> list[dict[str, int]]:
         and s >= scores_by_role["particulars"][i] + 8
         and not (scores_by_role["pack"][i] >= 90 and scores_by_role["pack"][i] > s)
     ]
+    alias_evidence_cols = [i for i in alias_cols if has_alias_header_evidence(headers[i])]
+    if alias_evidence_cols:
+        alias_cols = alias_evidence_cols
+
     purchase_cols = [
         i
         for i, s in enumerate(scores_by_role["purchase"])
@@ -203,6 +225,19 @@ def build_column_mappings(headers: list[str]) -> list[dict[str, int]]:
     purchase_evidence_cols = [i for i in purchase_cols if has_purchase_header_evidence(headers[i])]
     if purchase_evidence_cols:
         purchase_cols = purchase_evidence_cols
+
+    # When no purchase candidate has lexical evidence (e.g. "MRP", "₹", "price")
+    # but a dual-role alias+purchase column does (merged/stacked headers like
+    # "Cat.Nos\nMRP*/₹/Unit"), use it as shared purchase for other alias blocks.
+    has_any_evidence = any(has_purchase_header_evidence(headers[i]) for i in purchase_cols)
+    if not has_any_evidence:
+        dual_role_cols = [
+            i for i in alias_cols
+            if has_purchase_header_evidence(headers[i])
+            and scores_by_role["purchase"][i] >= 70
+        ]
+        if dual_role_cols:
+            purchase_cols = dual_role_cols
 
     mappings: list[dict[str, int]] = []
 

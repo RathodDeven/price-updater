@@ -13,6 +13,8 @@ from core.text_utils import split_cell_lines
 NUMERIC_TOKEN_PATTERN = re.compile(r"\d+(?:\.\d+)?")
 MIN_PURCHASE = 50.0
 MAX_PURCHASE = 500000.0
+# Price-on-request markers used in catalogs (■, •, etc.)
+PRICE_ON_REQUEST_CHARS = re.compile(r"[\uf06e\uf0b7\u25a0\u25cf\u2022]")
 
 
 def _normalize_alias(alias_group: str) -> str:
@@ -56,31 +58,76 @@ def _extract_row_pairs(text: str) -> list[tuple[str, float]]:
     if not lines:
         return []
 
+    has_por_marker = any(PRICE_ON_REQUEST_CHARS.search(line) for line in lines)
+    # POR markers inside descriptive text blocks typically mean MRP is
+    # unavailable; numeric tokens in those blocks are often current/pack values.
+    # Keep parsing only for numeric-only stacked cells (page-42 style).
+    if has_por_marker and re.search(r"[A-Za-z]", " ".join(lines)):
+        return []
+
     pairs: list[tuple[str, float]] = []
     pending_alias: str | None = None
+    # Accumulate all valid prices after an alias; the LAST one is MRP
+    # because stacked cells follow column order (alias, I_min, I_max, MRP).
+    pending_prices: list[float] = []
+    pending_price: float | None = None  # price-before-alias (reversed order)
+
+    def _flush_pending() -> None:
+        nonlocal pending_alias, pending_prices
+        if pending_alias is not None and pending_prices:
+            pairs.append((pending_alias, pending_prices[-1]))
+        pending_alias = None
+        pending_prices = []
 
     for line in lines:
+        # Price-on-request markers indicate MRP missing for nearby variants.
+        # Do not drop the whole cell; just break current alias->price chaining.
+        if PRICE_ON_REQUEST_CHARS.search(line):
+            _flush_pending()
+            pending_price = None
+            continue
+
         tokens = line.split()
         if len(tokens) >= 3:
             inline_pairs = _extract_inline_triplets(tokens)
             if inline_pairs:
+                _flush_pending()
                 pairs.extend(inline_pairs)
-                pending_alias = None
+                pending_price = None
                 continue
 
         if len(tokens) == 2 and _looks_like_alias_group(tokens[0], tokens[1]):
             alias = _normalize_alias(line)
             if looks_like_alias(alias, allow_numeric=True):
-                pending_alias = alias
+                _flush_pending()
+                # If a price was seen on a preceding line, pair it now.
+                if pending_price is not None:
+                    pairs.append((alias, pending_price))
+                    pending_price = None
+                else:
+                    pending_alias = alias
+                    pending_prices = []
             continue
 
-        if len(tokens) == 1 and _is_valid_price_token(tokens[0]) and pending_alias is not None:
-            pairs.append((pending_alias, round(float(tokens[0]), 2)))
-            pending_alias = None
+        if len(tokens) == 1 and _is_valid_price_token(tokens[0]):
+            price_val = round(float(tokens[0]), 2)
+            if pending_alias is not None:
+                pending_prices.append(price_val)
+            else:
+                # Price before alias: remember for next alias line.
+                pending_price = price_val
             continue
 
-        pending_alias = None
+        # Numeric tokens below MIN_PURCHASE (e.g. current ratings 18A, 25A)
+        # are common in stacked multi-column cells. Keep pending_alias alive
+        # so the actual MRP further down the cell can still be captured.
+        if len(tokens) == 1 and NUMERIC_TOKEN_PATTERN.fullmatch(tokens[0]):
+            continue
 
+        _flush_pending()
+        pending_price = None
+
+    _flush_pending()
     return pairs
 
 
@@ -110,6 +157,7 @@ def extract_alias_price_stream_rows(
     page_number: int,
     include_particulars: bool = False,
     include_pack: bool = False,
+    min_rows: int = 4,
 ) -> list[NormalizedRow]:
     """Extract rows from flattened token streams like '4210 12 3000 4210 13 3000'."""
     if not matrix:
@@ -152,4 +200,4 @@ def extract_alias_price_stream_rows(
                 best_by_key[key] = normalized
 
     rows = list(best_by_key.values())
-    return rows if len(rows) >= 4 else []
+    return rows if len(rows) >= min_rows else []

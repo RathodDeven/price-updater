@@ -39,6 +39,22 @@ def _read_aliases(xlsx_path: Path) -> list[str]:
     return aliases
 
 
+def _read_alias_purchase(xlsx_path: Path) -> list[tuple[str, float]]:
+    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
+    ws = wb[wb.sheetnames[0]]
+    rows: list[tuple[str, float]] = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or row[0] is None or row[1] is None:
+            continue
+        alias = str(row[0]).strip()
+        try:
+            purchase = float(row[1])
+        except (TypeError, ValueError):
+            continue
+        rows.append((alias, purchase))
+    return rows
+
+
 def test_sample_1_page_7_extracts_expected_rows(tmp_path: Path) -> None:
     out_xlsx = tmp_path / "sample_1_p7.xlsx"
     _extract_target_page(ROOT / "samples" / "sample_1.pdf", 7, out_xlsx)
@@ -79,6 +95,356 @@ def test_sample_4_page_79_includes_left_column_aliases(tmp_path: Path) -> None:
     out_xlsx = tmp_path / "sample_4_p79.xlsx"
     _extract_target_page(ROOT / "samples" / "sample_4.pdf", 79, out_xlsx)
     aliases = _read_aliases(out_xlsx)
-    assert len(aliases) >= 25
+    # Page includes one valid left table plus right accessory table; avoid
+    # counting non-priced CTX power matrix rows as aliases.
+    assert len(aliases) >= 17
     assert "416870" in aliases
     assert "416873" in aliases
+    assert "416874" in aliases
+    assert "416889" in aliases
+
+
+def test_sample_4_page_29_skips_when_purchase_column_empty(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "sample_4_p29.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 29, out_xlsx)
+    aliases = _read_aliases(out_xlsx)
+    assert aliases == []
+
+
+def test_sample_4_page_31_skips_description_numeric_false_purchase(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "sample_4_p31.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 31, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    assert ("507805", 100.0) not in rows
+    assert ("507806", 2762.0) in rows
+
+
+def test_sample_4_page_45_skips_description_text_as_alias(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "sample_4_p45.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 45, out_xlsx)
+    aliases = _read_aliases(out_xlsx)
+    garbage = [a for a in aliases if "TERMINAL" in a.upper() or "FRONT" in a.upper()]
+    assert garbage == []
+    assert any(a for a in aliases if a.startswith("026") or a.startswith("042"))
+
+
+def test_sample_4_page_54_uses_mrp_not_pack_values(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "sample_4_p54.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 54, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+
+    # Rotary handle rows must use MRP values, not pack=1.
+    assert ("668770", 1330.0) in row_set
+    assert ("668772", 1350.0) in row_set
+    assert ("668780", 2390.0) in row_set
+    assert ("668771", 2030.0) in row_set
+    assert ("668773", 2100.0) in row_set
+    assert ("668781", 3940.0) in row_set
+
+    assert ("668770", 1.0) not in row_set
+    assert ("668772", 1.0) not in row_set
+    assert ("668780", 1.0) not in row_set
+
+
+def test_sample_4_page_46_extracts_merged_supply_inverter_row(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "sample_4_p46.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 46, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+
+    # Merged text row contains alias + description + MRP in one cell.
+    assert ("026410", 14070.0) in row_set
+    # Row where alias is in particulars column and MRP is in mapped purchase column.
+    assert ("026266", 500.0) in row_set
+    # Neighbor row with missing MRP must not produce a false purchase.
+    assert not any(alias == "026405" for alias, _ in rows)
+
+
+def test_sample_4_page_54_extracts_phase_barrier_aliases(tmp_path: Path) -> None:
+    """Phase Barriers table has Cat.No/MRP/Pack stacked in one cell."""
+    out_xlsx = tmp_path / "sample_4_p54_phase.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 54, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+
+    assert ("669300", 180.0) in row_set
+    assert ("669301", 230.0) in row_set
+    assert ("026230", 260.0) in row_set
+
+
+def test_sample_4_page_55_uses_mrp_not_pack(tmp_path: Path) -> None:
+    """Stacked Cat.No/MRP/Pack cells must use MRP, not pack=1."""
+    out_xlsx = tmp_path / "sample_4_p55.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 55, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+
+    # Key Locks tables must have real MRP values
+    assert ("668774", 2680.0) in row_set
+    assert ("668777", 2640.0) in row_set
+    assert ("668782", 2640.0) in row_set
+    # Must NOT have pack=1 as purchase
+    assert ("668774", 1.0) not in row_set
+    assert ("668777", 1.0) not in row_set
+    # Padlocks table
+    assert ("027180", 1810.0) in row_set
+
+
+def test_sample_4_page_63_no_garbage_aliases(tmp_path: Path) -> None:
+    """Complex multi-section table must not produce cross-line or description aliases."""
+    out_xlsx = tmp_path / "sample_4_p63.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 63, out_xlsx)
+    aliases = _read_aliases(out_xlsx)
+
+    # No garbage from cross-line alias group matching
+    garbage = [a for a in aliases if len(a) > 8 and a.isdigit()]
+    assert garbage == [], f"Long numeric garbage aliases: {garbage}"
+
+    # No description text as alias
+    assert "IP20" not in aliases
+    assert not any("SHORTING" in a.upper() for a in aliases)
+
+    # Valid aliases present
+    assert "424006" in aliases
+    assert "424108" in aliases
+    assert "424201" in aliases
+
+
+def test_sample_4_page_66_skips_price_on_request(tmp_path: Path) -> None:
+    """Page with ■ price-on-request markers should not extract current ratings as MRP."""
+    out_xlsx = tmp_path / "sample_4_p66.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 66, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+
+    # Should not have current ratings as purchase values
+    bad_purchases = [p for _, p in rows if p in (63.0, 125.0, 4.0, 1.0)]
+    assert bad_purchases == [], f"Current ratings extracted as MRP: {bad_purchases}"
+
+
+def test_sample_4_page_77_uses_mrp_not_current_ratings(tmp_path: Path) -> None:
+    """Thermal relays page with I min/I max columns must use MRP, not current ratings."""
+    out_xlsx = tmp_path / "sample_4_p77.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 77, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    # Left-side "Standard type" entries: MRP = 2200
+    assert row_dict.get("416640") == 2200.0
+    assert row_dict.get("416645") == 2200.0
+    assert row_dict.get("416649") == 2200.0
+
+    # Right-side "Differential type": MRP = 2690-3480
+    assert row_dict.get("416660") == 2690.0
+    assert row_dict.get("416676") == 3480.0
+
+    # RTX³ 65 section: MRP = 4430
+    assert row_dict.get("416686") == 4430.0
+    assert row_dict.get("416690") == 4430.0
+
+    # RTX³ 100 section: MRP = 7170
+    assert row_dict.get("416728") == 7170.0
+    assert row_dict.get("416731") == 7170.0
+
+    # Must NOT have current ratings as purchase
+    current_ratings = {0.1, 0.16, 0.25, 0.4, 0.63, 1.0, 1.6, 2.5, 4.0, 5.0, 6.0,
+                       7.0, 9.0, 12.0, 16.0, 18.0, 22.0, 28.0, 54.0, 63.0, 70.0, 80.0}
+    bad = [(a, p) for a, p in rows if p in current_ratings]
+    assert bad == [], f"Current ratings extracted as MRP: {bad}"
+
+
+def test_sample_4_page_42_uses_mrp_not_current_ratings(tmp_path: Path) -> None:
+    """MCCBs page where 'Rated Current (A)' column must NOT be used as purchase."""
+    out_xlsx = tmp_path / "sample_4_p42.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 42, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    # Main MCCB product rows (top table) — previously missing
+    assert row_dict.get("420710") == 15670.0
+    assert row_dict.get("420711") == 15670.0
+    assert row_dict.get("420714") == 17820.0
+    assert row_dict.get("420718") == 30970.0
+    assert row_dict.get("420720") == 32750.0
+    assert row_dict.get("420721") == 34520.0
+    assert row_dict.get("420722") == 30270.0
+    assert row_dict.get("420725") == 34050.0
+
+    # Accessory rows (accessory sub-tables)
+    assert row_dict.get("420160") == 1540.0
+    assert row_dict.get("420161") == 2230.0
+    assert row_dict.get("421061") == 42400.0
+    assert row_dict.get("422624") == 12260.0
+
+    # Merged Motor Operator blocks with POR markers must pair price to the
+    # correct trailing alias, not the first alias in the stacked sequence.
+    assert row_dict.get("026144") == 62010.0
+    assert row_dict.get("026126") == 71800.0
+    assert row_dict.get("026123") == 71800.0
+    assert row_dict.get("026127") == 72480.0
+    assert "026140" not in row_dict
+    assert "026124" not in row_dict
+    assert "026119" not in row_dict
+
+    # Must NOT have current ratings as purchase
+    current_ratings = {16.0, 25.0, 32.0, 40.0, 50.0, 63.0, 80.0, 100.0, 125.0, 160.0}
+    bad = [(a, p) for a, p in rows if p in current_ratings]
+    assert bad == [], f"Current ratings extracted as MRP: {bad}"
+
+    # Should have 60+ rows (both main product table and all accessory sub-tables)
+    assert len(rows) >= 60, f"Expected ≥60 rows, got {len(rows)}"
+
+
+def test_sample_4_page_53_avoids_current_leak_for_alias_669198(tmp_path: Path) -> None:
+    """When alias has competing candidates, prefer MRP over rated-current leakage."""
+    out_xlsx = tmp_path / "sample_4_p53.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 53, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    # This alias appears in a row where current(250) and MRP(54260) coexist.
+    # Extraction must keep the MRP pair, not the current value.
+    assert row_dict.get("669198") == 54260.0
+
+    # Surrounding rows in same block stay correct.
+    assert row_dict.get("669197") == 48230.0
+    assert row_dict.get("669207") == 57270.0
+    assert row_dict.get("669208") == 64010.0
+
+
+def test_sample_4_page_78_avoids_current_leak_for_thermal_relays(tmp_path: Path) -> None:
+    """Mixed Imin/Imax/MRP stacked cells must map purchase to MRP, not current."""
+    out_xlsx = tmp_path / "sample_4_p78.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 78, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    # Thermal overload relay rows where purchase cell includes Imin/Imax/MRP/pack.
+    assert row_dict.get("416780") == 14340.0
+    assert row_dict.get("416781") == 14340.0
+    assert row_dict.get("416782") == 15900.0
+    assert row_dict.get("416783") == 15900.0
+    assert row_dict.get("416784") == 16510.0
+    assert row_dict.get("416786") == 21050.0
+    assert row_dict.get("416787") == 21050.0
+    assert row_dict.get("416788") == 21050.0
+    assert row_dict.get("416789") == 21050.0
+
+
+def test_sample_4_page_79_skips_ctx_kvar_matrix_garbage(tmp_path: Path) -> None:
+    """CTX kVAr/current matrix has no Cat.Nos+MRP pairs and must be skipped."""
+    out_xlsx = tmp_path / "sample_4_p79.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 79, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    # Valid rows from priced sections remain.
+    assert row_dict.get("416870") == 2540.0
+    assert row_dict.get("416871") == 2540.0
+    assert row_dict.get("416872") == 3480.0
+    assert row_dict.get("416873") == 3320.0
+    assert row_dict.get("416874") == 2410.0
+    assert row_dict.get("416875") == 3280.0
+    assert row_dict.get("416876") == 3550.0
+    assert row_dict.get("416877") == 3550.0
+
+    # Garbage aliases from CTX matrix must not be extracted.
+    for bad_alias in ["CTX322", "CTX340", "CTX365", "CTX3100", "CTX3225", "CTX3400", "CTX3800", "IEC60947-4-1"]:
+        assert bad_alias not in row_dict
+
+
+def test_sample_4_page_84_prefers_mrp_over_description_numbers(tmp_path: Path) -> None:
+    """Split rows with alias in description must use mapped MRP, not description numerics."""
+    out_xlsx = tmp_path / "sample_4_p84.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 84, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("417406") == 1700.0
+    assert row_dict.get("417408") == 1700.0
+    assert row_dict.get("417407") == 1700.0
+
+    # Ensure description numeric token ("63") is not used as purchase.
+    assert row_dict.get("417408") != 63.0
+
+
+def test_sample_4_page_94_prefers_mrp_column_over_nominal_rating(tmp_path: Path) -> None:
+    """Right-side rows with merged nominal+module+alias must use mapped MRP column."""
+    out_xlsx = tmp_path / "sample_4_p94.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 94, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    # Previously leaked nominal rating values (63/100/125) as purchase.
+    assert row_dict.get("406502") == 986.0
+    assert row_dict.get("406504") == 1354.0
+    assert row_dict.get("406505") == 1540.0
+    assert row_dict.get("406511") == 1560.0
+    assert row_dict.get("406514") == 1986.0
+
+
+def test_sample_4_page_93_skips_rows_with_por_in_mrp_column(tmp_path: Path) -> None:
+    """When mapped MRP cell is POR marker, row must be skipped (no nominal fallback)."""
+    out_xlsx = tmp_path / "sample_4_p93.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 93, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    # These aliases have POR marker in mapped MRP column on page 93.
+    # Do not emit fallback purchases from nominal/current values.
+    for bad_alias in ["408721", "408767", "408793", "408794"]:
+        assert bad_alias not in row_dict
+
+
+def test_sample_4_page_100_strips_flattened_alias_footnote_digits(tmp_path: Path) -> None:
+    """Cat.Nos with superscript footnotes must not append marker digits to alias."""
+    out_xlsx = tmp_path / "sample_4_p100.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 100, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+
+    # Right-side SPD table aliases carrying superscript 1 in source PDF should
+    # normalize to their base Cat.Nos values.
+    assert ("412276", 17732.0) in row_set
+    assert ("412277", 32328.0) in row_set
+    assert ("412256", 15312.0) in row_set
+    assert ("412257", 27854.0) in row_set
+    assert ("412281", 28980.0) in row_set
+    assert ("412283", 79524.0) in row_set
+
+    # Left-side block aliases should also be extracted.
+    assert ("414446", 24738.0) in row_set
+    assert ("414447", 24738.0) in row_set
+    assert ("414448", 24738.0) in row_set
+    assert ("414449", 24738.0) in row_set
+    assert ("414261", 10408.0) in row_set
+    assert ("414262", 11756.0) in row_set
+    assert ("414263", 11756.0) in row_set
+    assert ("414281", 20154.0) in row_set
+    assert ("414282", 20110.0) in row_set
+    assert ("414283", 20902.0) in row_set
+
+    for bad_alias in ["4122761", "4122771", "4122561", "4122571", "4122811", "4122831"]:
+        assert not any(alias == bad_alias for alias, _ in rows)
+
+
+def test_sample_4_page_112_blanking_plate_uses_mrp_not_pack(tmp_path: Path) -> None:
+    """Shifted subsection rows must not use pack as purchase (alias 601470)."""
+    out_xlsx = tmp_path / "sample_4_p112.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 112, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+
+    assert ("601470", 18.0) in row_set
+    assert ("601470", 10.0) not in row_set
+
+
+def test_sample_4_page_129_extracts_shifted_alias_573451(tmp_path: Path) -> None:
+    """Shifted rows with stale alias column must keep leading particulars Cat.No."""
+    out_xlsx = tmp_path / "sample_4_p129.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 129, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+
+    assert ("573451", 480.0) in row_set
+    assert ("573450", 406.0) in row_set

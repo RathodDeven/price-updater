@@ -7,6 +7,7 @@ import re
 from core.models import NormalizedRow
 from core.parsing import clean_pack, extract_alias, looks_like_alias, parse_price
 from core.quality_scoring import normalized_row_quality
+from core.header import has_purchase_header_evidence
 from core.text_utils import split_cell_lines
 
 
@@ -65,13 +66,38 @@ def _purchase_and_pack_from_cell(text: str) -> tuple[float | None, str]:
     return purchase, pack
 
 
-def _find_price_pack_column(matrix: list[list[str]], alias_col: int) -> int | None:
+def _detect_purchase_evidence_columns(matrix: list[list[str]], scan_rows: int = 12) -> set[int]:
+    """Collect columns that explicitly advertise purchase-role headers."""
+    purchase_cols: set[int] = set()
+    if not matrix:
+        return purchase_cols
+
+    max_cols = max((len(row) for row in matrix), default=0)
+    limit = min(len(matrix), max(1, scan_rows))
+    for row_idx in range(limit):
+        row = matrix[row_idx]
+        for col in range(max_cols):
+            cell = _cell(row, col)
+            if not cell:
+                continue
+            if has_purchase_header_evidence(cell):
+                purchase_cols.add(col)
+    return purchase_cols
+
+
+def _find_price_pack_column(
+    matrix: list[list[str]],
+    alias_col: int,
+    allowed_purchase_cols: set[int],
+) -> int | None:
     max_cols = max((len(row) for row in matrix), default=0)
     best_col = None
     best_score = 0
 
     for col in range(max_cols):
         if col == alias_col:
+            continue
+        if col not in allowed_purchase_cols:
             continue
         score = 0
         for row in matrix:
@@ -111,7 +137,11 @@ def extract_compact_vertical_rows(
     if alias_col is None:
         return []
 
-    price_pack_col = _find_price_pack_column(matrix, alias_col)
+    purchase_evidence_cols = _detect_purchase_evidence_columns(matrix)
+    if not purchase_evidence_cols:
+        return []
+
+    price_pack_col = _find_price_pack_column(matrix, alias_col, purchase_evidence_cols)
     if price_pack_col is None:
         return []
 

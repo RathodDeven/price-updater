@@ -9,13 +9,21 @@ from core.header import (
     detect_header_row_index,
     enrich_header_row,
     has_alias_header_evidence,
+    has_purchase_header_evidence,
     infer_sparse_row_mappings,
 )
 from core.dense_column import extract_dense_column_rows
 from core.compact_vertical import extract_compact_vertical_rows
-from core.alias_price_stream import extract_alias_price_stream_rows
+from core.alias_price_stream import extract_alias_price_stream_rows, _extract_row_pairs
 from core.models import NormalizedRow
-from core.parsing import clean_pack, extract_alias, looks_like_alias, parse_price
+from core.parsing import (
+    PRICE_ON_REQUEST_PATTERN,
+    clean_pack,
+    extract_alias,
+    looks_like_alias,
+    looks_like_alias_line,
+    parse_price,
+)
 from core.quality_scoring import (
     line_alias_count,
     line_pack_count,
@@ -280,6 +288,7 @@ def normalize_rows(
     page_number: int,
     include_particulars: bool = False,
     include_pack: bool = False,
+    inherited_mappings: list[dict[str, int]] | None = None,
 ) -> list[NormalizedRow]:
     """Normalize table matrix into validated rows using best-fit layout detection.
     
@@ -301,6 +310,418 @@ def normalize_rows(
                 best_by_key[key] = row
         return list(best_by_key.values())
 
+    def _inline_alias_price_pair(text: str) -> tuple[str, float] | None:
+        """Extract an inline alias+price pair from one mixed cell when present.
+
+        Handles rows where alias and purchase are embedded together in the alias
+        cell (for example split/right-side blocks with no standalone purchase
+        column for that sub-table).
+        """
+        best_pair: tuple[str, float] | None = None
+        for line in split_cell_lines(text):
+            tokens = line.replace(",", " ").split()
+            if len(tokens) < 3:
+                continue
+            for idx in range(len(tokens) - 2):
+                first, second, price_token = tokens[idx], tokens[idx + 1], tokens[idx + 2]
+                if not (first.isdigit() and second.isdigit() and 4 <= len(first) <= 6 and 2 <= len(second) <= 6):
+                    continue
+                parsed_price = parse_price(price_token)
+                if parsed_price is None:
+                    continue
+                if parsed_price < 50 or parsed_price > 500000:
+                    continue
+                inline_alias = f"{first}{second}"
+                if not looks_like_alias(inline_alias, allow_numeric=True):
+                    continue
+                best_pair = (inline_alias, round(parsed_price, 2))
+        return best_pair
+
+    def _mixed_text_alias_price_pair(text: str) -> tuple[str, float] | None:
+        """Extract one alias+price pair from mixed descriptive text.
+
+        Some merged rows embed alias + description + price in a single cell
+        (for example in the particulars column) while mapped alias/purchase
+        columns are blank. This parser finds a valid alias group and the first
+        valid price token that appears after it on the same line.
+        """
+        for line in split_cell_lines(text):
+            tokens = line.replace(",", " ").split()
+            if len(tokens) < 3:
+                continue
+            for idx in range(len(tokens) - 1):
+                first, second = tokens[idx], tokens[idx + 1]
+                if not (first.isdigit() and second.isdigit() and 4 <= len(first) <= 6 and 2 <= len(second) <= 6):
+                    continue
+                alias_candidate = f"{first}{second}"
+                if not looks_like_alias(alias_candidate, allow_numeric=True):
+                    continue
+                for token in tokens[idx + 2 :]:
+                    parsed = parse_price(token)
+                    if parsed is None:
+                        continue
+                    if 50 <= parsed <= 500000:
+                        return alias_candidate, round(parsed, 2)
+        return None
+
+    def _alias_group_from_text(text: str) -> str | None:
+        """Extract one numeric alias group from mixed text when present."""
+        for line in split_cell_lines(text):
+            tokens = line.replace(",", " ").split()
+            if len(tokens) < 2:
+                continue
+            for idx in range(len(tokens) - 1):
+                first, second = tokens[idx], tokens[idx + 1]
+                if not (first.isdigit() and second.isdigit() and 4 <= len(first) <= 6 and 2 <= len(second) <= 6):
+                    continue
+                alias_candidate = f"{first}{second}"
+                if looks_like_alias(alias_candidate, allow_numeric=True):
+                    return alias_candidate
+        return None
+
+    current_like_purchases = {
+        0.1,
+        0.16,
+        0.25,
+        0.4,
+        0.63,
+        1.0,
+        1.6,
+        2.5,
+        4.0,
+        5.0,
+        6.0,
+        7.0,
+        9.0,
+        10.0,
+        12.0,
+        16.0,
+        18.0,
+        20.0,
+        22.0,
+        25.0,
+        28.0,
+        32.0,
+        40.0,
+        50.0,
+        54.0,
+        63.0,
+        65.0,
+        70.0,
+        80.0,
+        85.0,
+        100.0,
+        120.0,
+        125.0,
+        160.0,
+        185.0,
+        200.0,
+        240.0,
+        250.0,
+        260.0,
+        300.0,
+        320.0,
+        330.0,
+        400.0,
+        520.0,
+        630.0,
+        800.0,
+        1000.0,
+        1250.0,
+        1600.0,
+    }
+
+    def _is_current_like_purchase(value: float) -> bool:
+        return round(float(value), 2) in current_like_purchases
+
+    def _looks_like_pack_token(text: str) -> bool:
+        compact = " ".join(text.split()).strip()
+        if not compact:
+            return False
+        if re.fullmatch(r"\d{1,2}", compact):
+            return True
+        if re.fullmatch(r"\d{1,2}\s*/\s*\d{1,2}", compact):
+            return True
+        return False
+
+    def _extract_last_numeric_price(text: str) -> float | None:
+        candidates: list[float] = []
+        for token in re.findall(r"\d+(?:,\d{3})*(?:\.\d+)?", text):
+            parsed = parse_price(token)
+            if parsed is not None:
+                candidates.append(parsed)
+        if not candidates:
+            return None
+        return round(candidates[-1], 2)
+
+    def _extract_with_mappings(
+        data_rows: list[list[str]],
+        mappings: list[dict[str, int]],
+        scored_headers: list[str] | None = None,
+        force_numeric_alias: bool = False,
+    ) -> list[NormalizedRow]:
+        normalized: list[NormalizedRow] = []
+        purchase_usage_count: dict[int, int] = {}
+        for _mapping in mappings:
+            p_idx = _mapping["purchase"]
+            purchase_usage_count[p_idx] = purchase_usage_count.get(p_idx, 0) + 1
+
+        for row_idx, row in enumerate(data_rows):
+            if not any(cell.strip() for cell in row):
+                continue
+            for mapping in mappings:
+                alias_raw = row[mapping["alias"]].strip() if mapping["alias"] < len(row) else ""
+                price_raw = row[mapping["purchase"]].strip() if mapping["purchase"] < len(row) else ""
+                particulars_raw = ""
+                if "particulars" in mapping and mapping["particulars"] < len(row):
+                    particulars_raw = row[mapping["particulars"]].strip()
+                between_raw = ""
+                left_col = min(mapping["alias"], mapping["purchase"])
+                right_col = max(mapping["alias"], mapping["purchase"])
+                if right_col - left_col > 1:
+                    between_cells = [
+                        row[col].strip()
+                        for col in range(left_col + 1, right_col)
+                        if col < len(row) and row[col].strip()
+                    ]
+                    between_raw = " ".join(between_cells).strip()
+                mapped_pack_raw = ""
+                if "pack" in mapping and mapping["pack"] < len(row):
+                    mapped_pack_raw = row[mapping["pack"]].strip()
+                shifted_pack_override = ""
+
+                # If mapped purchase cell explicitly signals price-on-request,
+                # treat MRP as unavailable and skip this row for this mapping.
+                # Do not salvage purchase from neighboring nominal/current text.
+                if price_raw and PRICE_ON_REQUEST_PATTERN.search(price_raw):
+                    continue
+
+                # Some merged matrices inside catalogs list electrical ratings
+                # (for example "9 A", "265 A") in the mapped alias column,
+                # while mapped purchase is actually kVAr/current, not MRP.
+                # Skip such rows unless the alias cell has catalog-like grouping.
+                if (
+                    re.search(r"\b\d+(?:\.\d+)?\s*A\b", alias_raw, flags=re.IGNORECASE)
+                    and not re.search(r"\d{4,6}[ \t]\d{2,6}", alias_raw)
+                ):
+                    continue
+
+                # Dual-role merged columns can map alias and purchase to the
+                # same index (for example "Cat.Nos ... MRP/Unit" in one cell).
+                # Parse them as inline/stacked stream pairs instead of taking
+                # one extracted alias and one extracted purchase from the same
+                # raw cell, which can produce garbage pairings.
+                if mapping["alias"] == mapping["purchase"]:
+                    stream_pairs = _extract_row_pairs(alias_raw)
+                    for stream_alias, stream_purchase in stream_pairs:
+                        if not looks_like_alias(stream_alias, allow_numeric=True):
+                            continue
+                        pack = ""
+                        if include_pack and "pack" in mapping and mapping["pack"] < len(row):
+                            pack = clean_pack(row[mapping["pack"]])
+                        normalized.append(
+                            NormalizedRow(
+                                particulars="",
+                                alias=stream_alias,
+                                purchase=round(stream_purchase, 2),
+                                pack=pack,
+                                source_page=page_number,
+                            )
+                        )
+                    continue
+
+                mixed_pair: tuple[str, float] | None = None
+                if (not alias_raw or not price_raw):
+                    mixed_pair = _mixed_text_alias_price_pair(alias_raw)
+                    if mixed_pair is None and particulars_raw:
+                        mixed_pair = _mixed_text_alias_price_pair(particulars_raw)
+
+                purchase = parse_price(price_raw)
+
+                # Some subsection rows collapse "No. of ways" + MRP into the
+                # particulars cell (e.g. "- 18") and shift pack (e.g. "10")
+                # into the mapped purchase column. Recover MRP from particulars
+                # and preserve shifted pack when dedicated pack cell is missing.
+                if (
+                    purchase is not None
+                    and _looks_like_pack_token(price_raw)
+                    and not mapped_pack_raw
+                    and (particulars_raw or between_raw)
+                ):
+                    shifted_purchase = None
+                    for candidate_text in (particulars_raw, between_raw):
+                        if not candidate_text:
+                            continue
+                        if not re.search(r"(?:^|\s)-\s*\d", candidate_text):
+                            continue
+                        shifted_purchase = _extract_last_numeric_price(candidate_text)
+                        if shifted_purchase is not None:
+                            break
+                    if shifted_purchase is not None:
+                        purchase = shifted_purchase
+                        shifted_pack_override = clean_pack(price_raw)
+                # Stacked purchase cells (e.g. "MRP\nPack\n4P-Cat.No") — try each
+                # newline-separated line and take the first valid price (≥ 50).
+                # This handles tables where MRP, pack, and 4P data are merged
+                # into one column by Camelot but the first line is the actual MRP.
+                if purchase is None and "\n" in price_raw:
+                    stacked_candidates: list[float] = []
+                    for _price_line in price_raw.split("\n"):
+                        _p = parse_price(_price_line.strip())
+                        if _p is not None and _p >= 50:
+                            stacked_candidates.append(_p)
+                    if stacked_candidates:
+                        # In stacked mixed cells, candidates can include
+                        # current ratings + MRP (+ pack). Prefer non-current-like
+                        # values and then take the highest remaining candidate.
+                        non_current = [v for v in stacked_candidates if not _is_current_like_purchase(v)]
+                        if non_current:
+                            purchase = max(non_current)
+                        else:
+                            purchase = max(stacked_candidates)
+
+                # Additional generic guard for merged technical matrices where
+                # alias cell may contain one catalog-looking token amidst
+                # current/rating lines (e.g. "85 A\n4168 77\n..."), and
+                # mapped purchase is actually a technical metric, not MRP.
+                if (
+                    purchase is not None
+                    and purchase <= 500
+                    and re.search(r"\b\d+(?:\.\d+)?\s*A\b", alias_raw, flags=re.IGNORECASE)
+                    and re.search(r"\d{4,6}[ \t]\d{2,6}", alias_raw)
+                    and re.search(r"[A-Za-z]", re.sub(r"\b\d+(?:\.\d+)?\s*A\b", "", alias_raw, flags=re.IGNORECASE))
+                ):
+                    continue
+                particulars_alias = _alias_group_from_text(particulars_raw) if particulars_raw else None
+
+                # Require line-level alias evidence in mapped alias columns.
+                # This prevents multi-word description cells (for example feature text)
+                # from being normalized into synthetic aliases.
+                has_alias_line_evidence = looks_like_alias_line(alias_raw) or bool(
+                    re.search(r"\d{3,6}[ \t]\d{2,6}", alias_raw)
+                )
+                if not has_alias_line_evidence:
+                    alias_lines = split_cell_lines(alias_raw)
+                    has_alias_line_evidence = any(looks_like_alias_line(line) for line in alias_lines)
+                if not has_alias_line_evidence:
+                    weak_alias = extract_alias(alias_raw, allow_numeric=True)
+                    # Allow generic salvage when purchase is valid and particulars
+                    # carries a split numeric alias group.
+                    has_particulars_salvage = purchase is not None and particulars_alias is not None
+                    # Without line-level alias evidence, accept only aliases with
+                    # stronger numeric signatures (2+ consecutive digits).
+                    # This rejects description-like tokens such as FRONT...-4P.
+                    if mixed_pair is None and not has_particulars_salvage and not re.search(r"\d{2,}", weak_alias):
+                        continue
+
+                allow_numeric_alias = force_numeric_alias or (
+                    scored_headers is not None
+                    and mapping["alias"] < len(scored_headers)
+                    and has_alias_header_evidence(scored_headers[mapping["alias"]])
+                )
+
+                alias = extract_alias(alias_raw, allow_numeric=allow_numeric_alias)
+
+                # Some merged rows place alias text in particulars while keeping
+                # purchase in the mapped purchase column.
+                if not alias and purchase is not None and particulars_alias is not None:
+                    alias = particulars_alias
+                    allow_numeric_alias = True
+
+                # In shifted rows, alias column can carry the previous row's
+                # Cat.No while particulars starts with the actual Cat.No for
+                # the current row (e.g. "5734 50" vs "5734 51 ...").
+                # When particulars begins with a valid alias group and conflicts
+                # with mapped alias, prefer particulars alias for this row.
+                if (
+                    alias
+                    and purchase is not None
+                    and particulars_alias is not None
+                    and particulars_alias != alias
+                    and re.match(r"^\s*\d{3,6}[ \t]\d{2,6}\b", particulars_raw)
+                ):
+                    alias = particulars_alias
+                    allow_numeric_alias = True
+
+                inline_pair = _inline_alias_price_pair(alias_raw)
+                if inline_pair is not None:
+                    inline_alias, inline_purchase = inline_pair
+                    # Inline alias+price in the same cell is stronger evidence
+                    # than a neighboring column in mixed/fragmented layouts.
+                    if inline_alias == alias:
+                        purchase = inline_purchase
+
+                # When alias cell has stacked alias_group + MRP (e.g. "4242 01\n950"),
+                # the cell-local MRP is more reliable than the mapped purchase column
+                # which may hold pack or unrelated values in sub-section rows.
+                purchase_has_header_evidence = (
+                    scored_headers is not None
+                    and mapping["purchase"] < len(scored_headers)
+                    and has_purchase_header_evidence(scored_headers[mapping["purchase"]])
+                )
+                purchase_is_shared = purchase_usage_count.get(mapping["purchase"], 0) > 1
+                if alias and (purchase is None or not purchase_has_header_evidence or purchase_is_shared):
+                    stacked_pairs = _extract_row_pairs(alias_raw)
+                    for stacked_alias, stacked_price in stacked_pairs:
+                        if stacked_alias == alias:
+                            purchase = stacked_price
+                            break
+
+                if purchase is None and (alias_raw or particulars_alias) and row_idx + 1 < len(data_rows):
+                    next_row = data_rows[row_idx + 1]
+                    next_alias_raw = next_row[mapping["alias"]].strip() if mapping["alias"] < len(next_row) else ""
+                    next_price_raw = next_row[mapping["purchase"]].strip() if mapping["purchase"] < len(next_row) else ""
+                    next_purchase = parse_price(next_price_raw)
+                    next_pack_raw = ""
+                    if "pack" in mapping and mapping["pack"] < len(next_row):
+                        next_pack_raw = next_row[mapping["pack"]].strip()
+                    if next_purchase is not None and not next_alias_raw and not next_pack_raw:
+                        purchase = next_purchase
+
+                if not alias and purchase is not None and particulars_alias is not None:
+                    alias = particulars_alias
+                    allow_numeric_alias = True
+
+                # If mapped alias/purchase cells are blank or incomplete, try a
+                # mixed-text salvage path from alias/raw particulars text.
+                # Apply this only after continuation-row salvage was attempted.
+                if mixed_pair is not None and purchase is None:
+                    mixed_alias, mixed_purchase = mixed_pair
+                    alias = mixed_alias
+                    purchase = mixed_purchase
+                    allow_numeric_alias = True
+
+                if not looks_like_alias(alias, allow_numeric=allow_numeric_alias) or purchase is None:
+                    continue
+
+                pack = ""
+                if include_pack and "pack" in mapping and mapping["pack"] < len(row):
+                    pack = clean_pack(row[mapping["pack"]])
+                if include_pack and not pack and shifted_pack_override:
+                    pack = shifted_pack_override
+
+                particulars = ""
+                if include_particulars:
+                    if "particulars" in mapping and mapping["particulars"] < len(row):
+                        particulars = " ".join(row[mapping["particulars"]].split()).strip()
+                    if not particulars:
+                        used = {mapping["alias"], mapping["purchase"]}
+                        if "pack" in mapping:
+                            used.add(mapping["pack"])
+                        particulars = fallback_particulars(row, used)
+
+                normalized.append(
+                    NormalizedRow(
+                        particulars=particulars,
+                        alias=alias,
+                        purchase=round(purchase, 2),
+                        pack=pack,
+                        source_page=page_number,
+                    )
+                )
+
+        return normalized
+
     # Check for horizontal table layout FIRST (before header mapping)
     horizontal_rows = extract_horizontal_table_rows(
         matrix,
@@ -316,6 +737,29 @@ def normalize_rows(
     scored_headers = enrich_header_row(matrix, base_row_idx=header_row_idx, base_headers=headers)
     mappings = build_column_mappings(scored_headers)
     if not mappings:
+        if inherited_mappings:
+            inherited_rows = _extract_with_mappings(
+                matrix,
+                inherited_mappings,
+                scored_headers=None,
+                force_numeric_alias=True,
+            )
+            if inherited_rows:
+                stream_rows = extract_alias_price_stream_rows(
+                    matrix,
+                    page_number=page_number,
+                    include_particulars=include_particulars,
+                    include_pack=include_pack,
+                )
+                return _merge_best(inherited_rows, stream_rows)
+
+        stream_rows = extract_alias_price_stream_rows(
+            matrix,
+            page_number=page_number,
+            include_particulars=include_particulars,
+            include_pack=include_pack,
+        )
+
         # Fall back to vertical table layouts
         compact_vertical_rows = extract_compact_vertical_rows(
             matrix,
@@ -324,12 +768,6 @@ def normalize_rows(
             include_pack=include_pack,
         )
         if len(compact_vertical_rows) >= 4:
-            stream_rows = extract_alias_price_stream_rows(
-                matrix,
-                page_number=page_number,
-                include_particulars=include_particulars,
-                include_pack=include_pack,
-            )
             return _merge_best(compact_vertical_rows, stream_rows)
 
         dense_rows = extract_dense_column_rows(
@@ -339,13 +777,10 @@ def normalize_rows(
             include_pack=include_pack,
         )
         if len(dense_rows) >= 3:
-            stream_rows = extract_alias_price_stream_rows(
-                matrix,
-                page_number=page_number,
-                include_particulars=include_particulars,
-                include_pack=include_pack,
-            )
             return _merge_best(dense_rows, stream_rows)
+
+        if len(stream_rows) >= 4:
+            return stream_rows
 
         sparse_rows = extract_sparse_rowwise_rows(
             matrix,
@@ -368,7 +803,20 @@ def normalize_rows(
             current = best_by_key.get(key)
             if current is None or normalized_row_quality(row) > normalized_row_quality(current):
                 best_by_key[key] = row
-        return list(best_by_key.values())
+        if best_by_key:
+            return list(best_by_key.values())
+
+        # Final fallback: try stream with relaxed threshold for small stacked
+        # tables (Cat.No/MRP/Pack in single cells) that don't reach 4 rows.
+        if not stream_rows:
+            stream_rows = extract_alias_price_stream_rows(
+                matrix,
+                page_number=page_number,
+                include_particulars=include_particulars,
+                include_pack=include_pack,
+                min_rows=2,
+            )
+        return stream_rows
 
     data_rows = matrix[header_row_idx + 1 :]
 
@@ -399,63 +847,14 @@ def normalize_rows(
         if purchase_small_ratio >= 0.7 and pack_high_ratio >= 0.5 and max(pack_vals) > max(purchase_vals) * 2:
             mapping["purchase"], mapping["pack"] = mapping["pack"], mapping["purchase"]
 
-    normalized: list[NormalizedRow] = []
+    normalized = _extract_with_mappings(data_rows, mappings, scored_headers=scored_headers)
 
-    for row_idx, row in enumerate(data_rows):
-        if not any(cell.strip() for cell in row):
-            continue
-        for mapping in mappings:
-            alias_raw = row[mapping["alias"]].strip() if mapping["alias"] < len(row) else ""
-            price_raw = row[mapping["purchase"]].strip() if mapping["purchase"] < len(row) else ""
-            allow_numeric_alias = (
-                mapping["alias"] < len(scored_headers)
-                and has_alias_header_evidence(scored_headers[mapping["alias"]])
-            )
-
-            alias = extract_alias(alias_raw, allow_numeric=allow_numeric_alias)
-            purchase = parse_price(price_raw)
-
-            if (
-                purchase is None
-                and alias_raw
-                and row_idx + 1 < len(data_rows)
-            ):
-                next_row = data_rows[row_idx + 1]
-                next_alias_raw = next_row[mapping["alias"]].strip() if mapping["alias"] < len(next_row) else ""
-                next_price_raw = next_row[mapping["purchase"]].strip() if mapping["purchase"] < len(next_row) else ""
-                next_purchase = parse_price(next_price_raw)
-                next_pack_raw = ""
-                if "pack" in mapping and mapping["pack"] < len(next_row):
-                    next_pack_raw = next_row[mapping["pack"]].strip()
-                if next_purchase is not None and not next_alias_raw and not next_pack_raw:
-                    purchase = next_purchase
-
-            if not looks_like_alias(alias, allow_numeric=allow_numeric_alias) or purchase is None:
-                continue
-
-            pack = ""
-            if include_pack and "pack" in mapping and mapping["pack"] < len(row):
-                pack = clean_pack(row[mapping["pack"]])
-
-            particulars = ""
-            if include_particulars:
-                if "particulars" in mapping and mapping["particulars"] < len(row):
-                    particulars = " ".join(row[mapping["particulars"]].split()).strip()
-                if not particulars:
-                    used = {mapping["alias"], mapping["purchase"]}
-                    if "pack" in mapping:
-                        used.add(mapping["pack"])
-                    particulars = fallback_particulars(row, used)
-
-            normalized.append(
-                NormalizedRow(
-                    particulars=particulars,
-                    alias=alias,
-                    purchase=round(purchase, 2),
-                    pack=pack,
-                    source_page=page_number,
-                )
-            )
+    compact_vertical_rows = extract_compact_vertical_rows(
+        matrix,
+        page_number=page_number,
+        include_particulars=include_particulars,
+        include_pack=include_pack,
+    )
 
     if normalized:
         stream_rows = extract_alias_price_stream_rows(
@@ -464,16 +863,17 @@ def normalize_rows(
             include_particulars=include_particulars,
             include_pack=include_pack,
         )
-        if not stream_rows:
+        # When header-mapped extraction already succeeded, treat stream output
+        # as supplemental and suppress current-like values that commonly leak
+        # from nominal/current columns in mixed layouts.
+        stream_rows = [r for r in stream_rows if not _is_current_like_purchase(r.purchase)]
+        # Merge compact_vertical rows so that pack values from stacked cells
+        # (e.g. "MRP\nPack" merged column) can upgrade pack-less header-path rows.
+        extras = stream_rows + compact_vertical_rows
+        if not extras:
             return normalized
-        return _merge_best(normalized, stream_rows)
+        return _merge_best(normalized, extras)
 
-    compact_vertical_rows = extract_compact_vertical_rows(
-        matrix,
-        page_number=page_number,
-        include_particulars=include_particulars,
-        include_pack=include_pack,
-    )
     if len(compact_vertical_rows) >= 4:
         stream_rows = extract_alias_price_stream_rows(
             matrix,
@@ -527,4 +927,15 @@ def normalize_rows(
         current = best_by_key.get(key)
         if current is None or normalized_row_quality(row) > normalized_row_quality(current):
             best_by_key[key] = row
-    return list(best_by_key.values())
+    if best_by_key:
+        return list(best_by_key.values())
+
+    # Final fallback: try stream with relaxed threshold for small stacked tables.
+    relaxed_stream = extract_alias_price_stream_rows(
+        matrix,
+        page_number=page_number,
+        include_particulars=include_particulars,
+        include_pack=include_pack,
+        min_rows=2,
+    )
+    return relaxed_stream

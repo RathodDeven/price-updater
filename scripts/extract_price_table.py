@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from core.config import configure_role_synonyms, load_parallel_processing_config
 from core.deduplication import deduplicate_rows
 from core.export import export_xlsx
+from core.header import build_column_mappings, detect_header_row_index, enrich_header_row
 from core.normalization import normalize_rows
 from core.page_triage import load_keyword_weights, select_candidate_pages
 from extractors import CamelotExtractor, DocumentAIExtractor, TableExtractor
@@ -42,13 +43,25 @@ def _process_page_tables(
 ) -> tuple[int, list, list[int]]:
     page_rows: list = []
     per_table_counts: list[int] = []
+    carried_mappings: list[dict[str, int]] | None = None
     for matrix in tables_on_page:
+        header_row_idx = detect_header_row_index(matrix)
+        headers = matrix[header_row_idx] if 0 <= header_row_idx < len(matrix) else []
+        scored_headers = enrich_header_row(matrix, base_row_idx=header_row_idx, base_headers=headers)
+        table_mappings = build_column_mappings(scored_headers)
+
+        inherited_mappings = None if table_mappings else carried_mappings
         extracted = normalize_rows(
             matrix,
             page_number=page_num + 1,
             include_particulars=include_particulars,
             include_pack=include_pack,
+            inherited_mappings=inherited_mappings,
         )
+
+        if table_mappings:
+            carried_mappings = table_mappings
+
         page_rows.extend(extracted)
         per_table_counts.append(len(extracted))
     return page_num, page_rows, per_table_counts

@@ -9,7 +9,7 @@ from core.parsing import looks_like_alias_line, parse_price
 
 def normalize_header(value: str) -> str:
     """Lowercase and remove special characters from header text."""
-    lowered = value.lower().replace("₹", " inr ")
+    lowered = value.lower().replace("\u20b9", " inr ").replace("`", " inr ")
     cleaned = re.sub(r"[^a-z0-9 ]+", " ", lowered)
     return re.sub(r"\s+", " ", cleaned).strip()
 

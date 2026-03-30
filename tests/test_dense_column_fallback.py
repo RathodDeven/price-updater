@@ -24,3 +24,19 @@ def test_dense_column_fallback_extracts_alias_and_price_rows() -> None:
     assert ("027007", 3870.0, "1/12") in keys
     assert ("027181", 130.0, "1") in keys
     assert all(alias != "027140" for alias, _, _ in keys)
+
+
+def test_dense_column_fallback_skips_description_numeric_without_purchase() -> None:
+    matrix = [
+        ["", "Cat.Nos / Description / MRP", "", ""],
+        ["", "5078 05            DRX 100             3 ", "1", ""],
+        ["", "5078 06            DRX 100             3\n2762", "1", ""],
+        ["", "0271 64\n3470", "1", ""],
+        ["", "0271 65\n3470", "1", ""],
+    ]
+
+    rows = normalize_rows(matrix, page_number=31, include_particulars=False, include_pack=False)
+    keys = {(r.alias, r.purchase) for r in rows}
+
+    assert ("507805", 100.0) not in keys
+    assert ("507806", 2762.0) in keys

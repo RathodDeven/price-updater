@@ -153,6 +153,13 @@ The extractor currently handles these generic table patterns:
 17. Vertical dense-column tables where alias and purchase are stacked in one merged text column and pack appears in a nearby column
 18. Compact vertical blocks where Cat.Nos is separate but MRP and Pack are stacked line-wise in one column
 19. Flattened accessory matrices where repeated Cat.Nos MRP pairs appear as token streams in one row/cell
+20. Compact vertical fallback now requires explicit purchase-header evidence (for example MRP/Unit markers); if purchase column is absent/blank, rows are skipped instead of borrowing numeric values from rated-current columns
+21. Dense merged cells now reject description-only numerics (for example DRX 100) as purchase unless purchase-role evidence exists; rows with blank MRP are skipped
+22. Headerless follow-on table fragments on the same page can inherit alias/purchase column roles from the nearest prior header-mapped table, so extraction stays column-role driven instead of falling back to broad alias token guessing
+23. Stacked Cat.No/MRP/Pack cells within a single column are parsed as triplets — MRP is the first qualified price (≥50), not pack
+24. Price-on-request markers (■/\uf06e) skip the row instead of extracting current ratings or pack values as MRP
+25. Reversed MRP-before-alias stacking (e.g. `1800\n4242 11`) is recognised by the stream parser
+26. Cross-line alias groups prevented — only horizontal whitespace (space/tab) separates alias digit groups, not newlines
 
 This also covers mixed rows where several Cat.Nos are listed first but only the last one or two have visible MRP values (for example some variants are price-on-request while later variants have explicit MRP).
 
@@ -195,6 +202,11 @@ Best for:
 - complex OCR-heavy layouts
 - cases where PDF text extraction quality itself is poor (not just table boundary detection)
 
+What is a "processor"?
+- In Document AI, a processor is the hosted model endpoint that processes your files and returns a structured `Document` response.
+- You create a processor once in Google Cloud, then call it by processor ID from this project.
+- For this repository's current `docai` backend, use a processor that returns page tables (Form Parser is the safest default).
+
 Set in .env:
 EXTRACTION_BACKEND=docai
 GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/service-account.json
@@ -202,6 +214,53 @@ GOOGLE_CLOUD_PROJECT=your-project-id
 GOOGLE_CLOUD_LOCATION=us
 GOOGLE_DOCAI_PROCESSOR_ID=your-processor-id
 GOOGLE_DOCAI_PROCESSOR_VERSION=
+
+### Document AI setup (step by step)
+
+Follow these once per Google Cloud project:
+
+1. Create/select a Google Cloud project and enable billing.
+2. Enable the Document AI API.
+3. Create a processor in Document AI console:
+  - Recommended for this repo: Form Parser (table extraction + OCR).
+  - Choose region matching your location setting (`us` or `eu`, etc.).
+4. Create a service account and grant Document AI permissions.
+5. Create and download a JSON key for that service account.
+6. Save key securely on your machine (outside repo), then set:
+  - `GOOGLE_APPLICATION_CREDENTIALS` = absolute path to JSON key.
+7. Copy processor metadata from console:
+  - Project ID -> `GOOGLE_CLOUD_PROJECT`
+  - Processor ID -> `GOOGLE_DOCAI_PROCESSOR_ID`
+  - Region -> `GOOGLE_CLOUD_LOCATION`
+  - Optional processor version -> `GOOGLE_DOCAI_PROCESSOR_VERSION`
+8. Update `.env`:
+
+```env
+EXTRACTION_BACKEND=docai
+GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/sa-key.json
+GOOGLE_CLOUD_PROJECT=my-gcp-project
+GOOGLE_CLOUD_LOCATION=us
+GOOGLE_DOCAI_PROCESSOR_ID=1234567890abcdef
+GOOGLE_DOCAI_PROCESSOR_VERSION=
+```
+
+9. Run a smoke test:
+
+```bash
+python scripts/extract_price_table.py \
+  --input-pdf ./samples/sample_4.pdf \
+  --target-page 46 \
+  --output-xlsx /tmp/docai_test.xlsx \
+  --backend docai
+```
+
+If credentials or processor config are missing, the script exits with a clear startup error.
+
+Official docs used for setup:
+- Document AI overview: https://docs.cloud.google.com/document-ai/docs/overview
+- Processor types and capabilities: https://docs.cloud.google.com/document-ai/docs/processors-list
+- Client-library setup and authentication: https://docs.cloud.google.com/document-ai/docs/process-documents-client-libraries
+- Response structure (tables/forms/entities): https://docs.cloud.google.com/document-ai/docs/handle-response
 
 ## Why per-client/per-PDF mapping is a good idea
 

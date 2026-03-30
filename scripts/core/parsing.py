@@ -14,8 +14,12 @@ from core.models import (
 
 
 NON_ALIAS_POLE_PATTERN = re.compile(r"^\d+(?:[\-\s]?(?:P|POLE|POLES))$", re.IGNORECASE)
+NON_ALIAS_IP_RATING_PATTERN = re.compile(r"^IP\d{1,2}$", re.IGNORECASE)
 TRAILING_ALIAS_FOOTNOTE_PATTERN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9\-_/\.]*?)([0-9\u00B9\u00B2\u00B3\u2070-\u2079])\)\s*$")
 NUMERIC_ALIAS_PATTERN = re.compile(r"^\d{5,12}$")
+
+# Price-on-request markers used in catalogs (■, •, etc.)
+PRICE_ON_REQUEST_PATTERN = re.compile(r"[\uf06e\uf0b7\u25a0\u25cf\u2022]")
 
 
 def parse_price(value: str) -> float | None:
@@ -29,6 +33,9 @@ def parse_price(value: str) -> float | None:
     raw = str(value).strip()
     compact = raw.replace(" ", "")
     if re.search(r"[A-Za-z]", compact):
+        return None
+    # Reject cells with price-on-request markers (■, •, etc.)
+    if PRICE_ON_REQUEST_PATTERN.search(compact):
         return None
 
     # Reject cells that contain multiple standalone numeric chunks (typically
@@ -74,6 +81,25 @@ def strip_alias_footnote_suffix(value: str) -> str:
     return m.group(1)
 
 
+def normalize_spaced_numeric_alias(numeric_group: str) -> str:
+    """Normalize spaced numeric aliases and strip probable flattened footnote digits.
+
+    Some PDFs render superscript footnote markers next to Cat.Nos values
+    (for example ``4122 76¹``). Table extraction can flatten this into
+    ``4122 761``. For spaced numeric aliases, treat a trailing 1/2/3 in a
+    3-digit suffix as a likely footnote marker and drop it.
+    """
+    parts = re.split(r"[ \t]+", numeric_group.strip())
+    if len(parts) != 2:
+        return clean_alias(numeric_group)
+    left, right = parts[0], parts[1]
+    if len(right) == 3 and right[-1] in {"1", "2", "3"}:
+        candidate = f"{left}{right[:-1]}"
+        if looks_like_alias(candidate, allow_numeric=True):
+            return candidate
+    return clean_alias(numeric_group)
+
+
 def extract_alias(value: str, allow_numeric: bool = False) -> str:
     """Extract the best alias token from a raw cell value.
 
@@ -88,23 +114,33 @@ def extract_alias(value: str, allow_numeric: bool = False) -> str:
         candidate = clean_alias(token)
         if not looks_like_alias(candidate, allow_numeric=allow_numeric):
             continue
+        # Reject pure-letter concatenations from multi-word description text.
+        # In mixed layouts, alphabetic-only tokens are usually not product codes.
+        if has_mixed_layout and re.fullmatch(r"[A-Za-z\-_/\.]+", candidate):
+            # Skip pure-alphabet tokens from multiword context to avoid choosing description.
+            continue
         if len(candidate) > len(best):
             best = candidate
 
     cleaned = clean_alias(base_value)
 
     if allow_numeric:
-        # Handle split numeric aliases like "0281 32" (and multiline variants)
-        # without concatenating neighboring aliases from the same cell.
-        for numeric_group in re.findall(r"\d{3,6}\s\d{2,6}", base_value):
-            numeric_candidate = clean_alias(numeric_group)
+        # Handle split numeric aliases like "0281 32" within a single line.
+        # Use [ \t] instead of \s to avoid matching across newlines, which
+        # would merge unrelated numbers from adjacent lines (e.g. 7000\n4240).
+        for numeric_group in re.findall(r"\d{3,6}[ \t]\d{2,6}", base_value):
+            numeric_candidate = normalize_spaced_numeric_alias(numeric_group)
             if looks_like_alias(numeric_candidate, allow_numeric=True):
                 return numeric_candidate
 
     if allow_numeric and has_mixed_layout:
         # In mixed multiline cells, keep one line-level numeric alias and avoid
         # concatenating multiple aliases into a synthetic code.
+        # Skip description-like lines (many words) which would produce
+        # garbage aliases when concatenated (e.g. "DSX DIN Shorting..." → "DSXDIN...").
         for line in base_value.splitlines():
+            if len(line.split()) > 3:
+                continue
             line_candidate = clean_alias(line)
             if looks_like_alias(line_candidate, allow_numeric=True):
                 return line_candidate
@@ -113,6 +149,11 @@ def extract_alias(value: str, allow_numeric: bool = False) -> str:
         return cleaned
 
     if has_mixed_layout and best:
+        return best
+
+    # In mixed layout with no individual token qualifying as alias,
+    # do not return the full concatenation — it's likely description text.
+    if has_mixed_layout:
         return best
 
     if looks_like_alias(cleaned, allow_numeric=allow_numeric):
@@ -138,6 +179,9 @@ def looks_like_alias(value: str, allow_numeric: bool = False) -> bool:
     if NON_ALIAS_UNIT_PATTERN.match(value):
         return False
     if NON_ALIAS_POLE_PATTERN.match(value):
+        return False
+    # Reject IP protection ratings (IP20, IP54, etc.)
+    if NON_ALIAS_IP_RATING_PATTERN.match(value):
         return False
     if allow_numeric and NUMERIC_ALIAS_PATTERN.match(value):
         return True
