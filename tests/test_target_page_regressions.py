@@ -48,7 +48,7 @@ def _read_alias_purchase(xlsx_path: Path) -> list[tuple[str, float]]:
             continue
         alias = str(row[0]).strip()
         try:
-            purchase = float(row[1])
+            purchase = float(str(row[1]).strip())
         except (TypeError, ValueError):
             continue
         rows.append((alias, purchase))
@@ -273,7 +273,7 @@ def test_sample_4_page_42_uses_mrp_not_current_ratings(tmp_path: Path) -> None:
     # Accessory rows (accessory sub-tables)
     assert row_dict.get("420160") == 1540.0
     assert row_dict.get("420161") == 2230.0
-    assert row_dict.get("421061") == 42400.0
+    assert row_dict.get("421060") == 42400.0
     assert row_dict.get("422624") == 12260.0
 
     # Merged Motor Operator blocks with POR markers must pair price to the
@@ -290,6 +290,10 @@ def test_sample_4_page_42_uses_mrp_not_current_ratings(tmp_path: Path) -> None:
     current_ratings = {16.0, 25.0, 32.0, 40.0, 50.0, 63.0, 80.0, 100.0, 125.0, 160.0}
     bad = [(a, p) for a, p in rows if p in current_ratings]
     assert bad == [], f"Current ratings extracted as MRP: {bad}"
+
+    # Shifted dual-role motor-operator block: leading MRP in shared purchase
+    # cell belongs to left alias (421060), not first in-cell alias (421061).
+    assert row_dict.get("421061") == 38080.0
 
     # Should have 60+ rows (both main product table and all accessory sub-tables)
     assert len(rows) >= 60, f"Expected ≥60 rows, got {len(rows)}"
@@ -381,6 +385,23 @@ def test_sample_4_page_94_prefers_mrp_column_over_nominal_rating(tmp_path: Path)
     assert row_dict.get("406505") == 1540.0
     assert row_dict.get("406511") == 1560.0
     assert row_dict.get("406514") == 1986.0
+    assert row_dict.get("408831") == 2172.0
+
+    # Section headings must not be emitted as synthetic aliases.
+    assert "DOUBLEPOLE240V" not in row_dict
+
+
+def test_sample_4_page_95_recovers_split_rcb_prices(tmp_path: Path) -> None:
+    """Split rows with alias and MRP separated by image-label noise should recover true MRP."""
+    out_xlsx = tmp_path / "sample_4_p95.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 95, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("411851") == 4022.0
+    assert row_dict.get("411852") == 4670.0
+    assert row_dict.get("411873") == 9146.0
+    assert row_dict.get("411898") == 10148.0
 
 
 def test_sample_4_page_93_skips_rows_with_por_in_mrp_column(tmp_path: Path) -> None:
@@ -448,3 +469,42 @@ def test_sample_4_page_129_extracts_shifted_alias_573451(tmp_path: Path) -> None
 
     assert ("573451", 480.0) in row_set
     assert ("573450", 406.0) in row_set
+
+
+def test_sample_4_page_290_extracts_alias_057299_with_trailing_particulars_price(tmp_path: Path) -> None:
+    """Rows with blank purchase column but trailing MRP in particulars should be recovered."""
+    out_xlsx = tmp_path / "sample_4_p290.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 290, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+
+    assert ("057299", 32970.0) in row_set
+    assert ("058918", 29260.0) in row_set
+
+
+def test_sample_4_page_289_recovers_mrp_when_purchase_cell_has_pack_token(tmp_path: Path) -> None:
+    """Shifted rows with purchase=pack token should recover MRP from particulars text."""
+    out_xlsx = tmp_path / "sample_4_p289.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 289, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+
+    assert ("057720", 4170.0) in row_set
+    assert ("057720", 1.0) not in row_set
+
+
+def test_sample_4_page_256_recovers_mrp_for_011110_in_split_rows(tmp_path: Path) -> None:
+    """Split rows should not inherit description numeric tokens as purchase."""
+    out_xlsx = tmp_path / "sample_4_p256.xlsx"
+    _extract_target_page(ROOT / "samples" / "sample_4.pdf", 256, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+
+    assert ("011110", 1450.0) in row_set
+    assert ("011110", 65.0) not in row_set
+    assert ("011162", 470.0) in row_set
+    assert ("011162", 65.0) not in row_set
+    assert ("638001", 210.0) in row_set
+    assert ("638001", 75.0) not in row_set
+    assert ("638038", 1270.0) in row_set
+    assert ("638008", 240.0) in row_set

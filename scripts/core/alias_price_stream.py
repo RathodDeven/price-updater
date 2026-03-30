@@ -124,6 +124,11 @@ def _extract_row_pairs(text: str) -> list[tuple[str, float]]:
         if len(tokens) == 1 and NUMERIC_TOKEN_PATTERN.fullmatch(tokens[0]):
             continue
 
+        # Pack markers (e.g. 1/5/60) can appear between price and alias in
+        # stacked cells. Keep pending chain so trailing alias still gets price.
+        if re.fullmatch(r"\d+\s*/\s*\d+\s*/\s*\d+", line):
+            continue
+
         _flush_pending()
         pending_price = None
 
@@ -145,10 +150,54 @@ def _extract_adjacent_cell_pairs(row_cells: list[str]) -> list[tuple[str, float]
         alias = _normalize_alias(alias_raw)
         if not looks_like_alias(alias, allow_numeric=True):
             continue
+        # Adjacent-cell fallback should only trust price cells that are mostly
+        # numeric. This avoids pulling trailing numbers from descriptions like
+        # "... Cover Joint 75" when the real MRP exists in another column.
+        if re.search(r"[A-Za-z]", price_raw):
+            continue
         purchase = parse_price(price_raw)
         if purchase is None or purchase < MIN_PURCHASE or purchase > MAX_PURCHASE:
             continue
         pairs.append((alias, round(purchase, 2)))
+    return pairs
+
+
+def _extract_spread_row_pairs(row_cells: list[str]) -> list[tuple[str, float]]:
+    """Extract alias-price pairs when description cells sit between them.
+
+    Example layout in one row: `Cat.No | Description ... 75 | MRP | Pack`.
+    Adjacent alias->price parsing is intentionally strict to avoid grabbing
+    description suffix numbers, so this helper recovers MRP from later numeric
+    cells only when text cells appear between alias and the numeric price.
+    """
+    pairs: list[tuple[str, float]] = []
+    for idx in range(len(row_cells) - 2):
+        alias_raw = row_cells[idx]
+        alias_tokens = alias_raw.split()
+        if len(alias_tokens) != 2:
+            continue
+        first, second = alias_tokens
+        if not _looks_like_alias_group(first, second):
+            continue
+        alias = _normalize_alias(alias_raw)
+        if not looks_like_alias(alias, allow_numeric=True):
+            continue
+
+        seen_text_between = False
+        chosen_price: float | None = None
+        for cell in row_cells[idx + 1 :]:
+            if re.search(r"[A-Za-z]", cell):
+                seen_text_between = True
+                continue
+            parsed = parse_price(cell)
+            if parsed is None or parsed < MIN_PURCHASE or parsed > MAX_PURCHASE:
+                continue
+            if seen_text_between:
+                chosen_price = round(parsed, 2)
+                break
+
+        if chosen_price is not None:
+            pairs.append((alias, chosen_price))
     return pairs
 
 
@@ -172,6 +221,7 @@ def extract_alias_price_stream_rows(
 
         row_pairs: list[tuple[str, float]] = []
         row_pairs.extend(_extract_adjacent_cell_pairs(row_cells))
+        row_pairs.extend(_extract_spread_row_pairs(row_cells))
         for target in row_cells:
             row_pairs.extend(_extract_row_pairs(target))
 

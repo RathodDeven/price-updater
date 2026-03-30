@@ -85,6 +85,16 @@ def deduplicate_rows(rows: list[NormalizedRow]) -> list[NormalizedRow]:
         if current is None or normalized_row_quality(row) > normalized_row_quality(current):
             best_by_key[key] = row
 
+    # Remove flattened superscript-footnote aliases when the base alias exists
+    # with the same purchase (e.g. 4122761 alongside canonical 412276).
+    for key, row in list(best_by_key.items()):
+        alias = row.alias
+        if not (isinstance(alias, str) and alias.isdigit() and len(alias) >= 7):
+            continue
+        base_alias_key = (alias[:-1], row.purchase)
+        if base_alias_key in best_by_key:
+            del best_by_key[key]
+
     # Layer 2: Enforce alias uniqueness
     by_alias: dict[str, list[NormalizedRow]] = {}
     for row in best_by_key.values():
@@ -96,6 +106,16 @@ def deduplicate_rows(rows: list[NormalizedRow]) -> list[NormalizedRow]:
         # If alias has both current-like and non-current-like purchases,
         # prefer non-current-like candidates (current leakage safeguard).
         pool = non_current_like if non_current_like else candidates
+
+        # Description-suffix leakage often produces a small competing numeric
+        # value (e.g. 75) alongside a true MRP in the same alias group.
+        # Prefer the higher purchase only in this narrow small-vs-MRP pattern.
+        if len(pool) > 1:
+            prices = sorted({round(r.purchase, 2) for r in pool})
+            low, high = prices[0], prices[-1]
+            if low <= 120 and high >= 150:
+                pool = [r for r in pool if round(r.purchase, 2) == high]
+
         best_by_alias[alias] = max(pool, key=normalized_row_quality)
 
     return list(best_by_alias.values())

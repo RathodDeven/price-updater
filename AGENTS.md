@@ -62,6 +62,9 @@ Repository agent rules for `price-updater`.
 - Flattened superscript footnotes in numeric Cat.Nos (e.g. `4122 76¹` extracted as `4122 761`) must normalize back to base alias (`412276`), not keep the marker digit in alias.
 - In subsection rows where Camelot shifts columns (e.g. `Cat.No | - 18 | 10` under `No. of Ws | MRP | Pack`), treat pack-like mapped purchase tokens (`10`, `5/10`) as shifted pack and recover MRP from intermediate dash-prefixed numeric cell (`- 18`).
 - In shifted rows where alias column repeats the previous Cat.No but particulars starts with a new Cat.No (e.g. alias `5734 50` vs particulars `5734 51 ...`), prefer the leading particulars alias when purchase is valid.
+- When recovering MRP from the end of particulars/description text, only accept a standalone trailing numeric token (e.g. `..., 32970`), not digits embedded inside a product code suffix (e.g. `5ST3070`).
+- In mapped rows where purchase cell is pack-like (`1`, `5/10`, etc.) and alias is valid, check particulars/intermediate between-columns for a trailing standalone price and prefer it as MRP; treat purchase-cell token as shifted pack.
+- Nearby-column MRP recovery (when mapped purchase cell is blank) must only consider purchase-header-evidenced columns near alias, and should ignore candidates that are only current-like values.
 
 ## Change Discipline
 - Make smallest viable changes.
@@ -110,9 +113,15 @@ Repository agent rules for `price-updater`.
 ## Code Organization & Modularity
 
 ### File Size Rule
-- **Maximum 200 lines per file** in `scripts/core/`
-- Split logic into focused modules when files exceed this threshold
-- Rationale: Files >200 lines become hard to read, debug, and test
+- **Preferred target: <= 400 lines per file**
+- **Hard cap: 500 lines per file** (including files outside `scripts/core/`)
+- For `scripts/core/`, keep files as small as practical (often around 200-300 lines) by splitting cohesive logic into focused modules
+- Rationale: very large files are harder to reason about, debug, and regression-test
+
+### Folder Architecture Rule
+- Keep related implementation files in the same domain folder (for example normalization-related logic under `scripts/core/` in dedicated modules)
+- Avoid mixing unrelated responsibilities into one large file; split by concern and wire through imports
+- For similar service-style logic, create grouped modules inside the relevant folder rather than scattering helpers across distant directories
 
 ### Module Organization
 **`scripts/core/`** — Extraction logic (each module is single responsibility):
@@ -122,7 +131,10 @@ Repository agent rules for `price-updater`.
 - `quality_scoring.py` — Quality metrics & ranking (pack_column_quality, normalized_row_quality)
 - `header.py` — Header detection & column mapping (build_column_mappings, infer_sparse_row_mappings)
 - `table_analysis.py` — Table layout detection (extract_horizontal_table_rows)
-- `normalization.py` — Row normalization dispatch (packed, sparse, vertical, horizontal)
+- `normalization.py` — Row normalization dispatch/orchestration
+- `normalization_mapped.py` — Header-mapped row extraction
+- `normalization_fallbacks.py` — Sparse/packed fallback extractors
+- `normalization_helpers.py` — Shared normalization utilities
 - `deduplication.py` — Two-layer dedup logic (alias+price, then alias-only)
 - `export.py` — Excel output (export_xlsx)
 - `config.py` — Profile loading & role configuration (load_profile, configure_role_synonyms)
@@ -150,7 +162,7 @@ extract_price_table  ←  (import all: config, normalization, dedup, export)
 ```
 
 ### When to Split a File
-If a file approaches 200 lines:
+If a file approaches 400 lines (or starts mixing concerns):
 1. Identify cohesive sub-groups of functions
 2. Extract to new `core/MODULE_name.py`
 3. Update imports in dependent files

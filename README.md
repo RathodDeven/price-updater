@@ -160,6 +160,7 @@ The extractor currently handles these generic table patterns:
 24. Price-on-request markers (■/\uf06e) skip the row instead of extracting current ratings or pack values as MRP
 25. Reversed MRP-before-alias stacking (e.g. `1800\n4242 11`) is recognised by the stream parser
 26. Cross-line alias groups prevented — only horizontal whitespace (space/tab) separates alias digit groups, not newlines
+27. Adjacent-cell stream fallback now ignores price candidates from alphabetic description cells (for example `... Cover Joint 75`) so numeric suffixes in text do not override real MRP columns
 
 This also covers mixed rows where several Cat.Nos are listed first but only the last one or two have visible MRP values (for example some variants are price-on-request while later variants have explicit MRP).
 
