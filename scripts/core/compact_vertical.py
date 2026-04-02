@@ -8,6 +8,7 @@ from core.models import NormalizedRow
 from core.parsing import clean_pack, extract_alias, looks_like_alias, parse_price
 from core.quality_scoring import normalized_row_quality
 from core.header import has_purchase_header_evidence
+from core.normalization_helpers import is_current_like_purchase
 from core.text_utils import split_cell_lines
 
 
@@ -45,23 +46,27 @@ def _purchase_and_pack_from_cell(text: str) -> tuple[float | None, str]:
         return None, ""
 
     lines = split_cell_lines(text)
-    purchase = None
+    price_candidates: list[float] = []
     pack = ""
 
     for line in lines:
-        if purchase is None:
-            parsed = parse_price(line)
-            if parsed is not None:
-                purchase = round(parsed, 2)
-                continue
+        parsed = parse_price(line)
+        if parsed is not None and parsed >= MIN_COMPACT_PURCHASE:
+            price_candidates.append(round(parsed, 2))
+            continue
 
         if not pack:
             cleaned_pack = clean_pack(line)
             if cleaned_pack:
                 pack = cleaned_pack
 
-        if purchase is not None and pack:
+        if price_candidates and pack:
             break
+
+    purchase = None
+    if price_candidates:
+        non_current = [value for value in price_candidates if not is_current_like_purchase(value)]
+        purchase = max(non_current) if non_current else max(price_candidates)
 
     return purchase, pack
 

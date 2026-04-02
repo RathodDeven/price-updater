@@ -299,6 +299,99 @@ def test_sample_4_page_42_uses_mrp_not_current_ratings(tmp_path: Path) -> None:
     assert len(rows) >= 60, f"Expected ≥60 rows, got {len(rows)}"
 
 
+def test_main_price_list_page_46_skips_alias_purchase_inversions(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p46.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 46, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+    aliases = {alias for alias, _ in rows}
+
+    assert ("625018", 1380.0) in row_set
+    assert "DPX250ER" not in aliases
+    assert "12VAC/DC" not in aliases
+    assert "VOL.24VAC/DC" not in aliases
+    assert "48VAC/DC" not in aliases
+
+
+def test_main_price_list_page_44_skips_price_on_request_mccb_grid(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p44.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 44, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+
+    assert rows == []
+
+
+def test_main_price_list_page_45_skips_price_on_request_mccb_grid(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p45.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 45, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+
+    assert rows == []
+
+
+def test_main_price_list_page_37_skips_description_model_names_as_aliases(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p37.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 37, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+    aliases = {alias for alias, _ in rows}
+
+    assert ("028300", 42090.0) in row_set
+    assert ("028302", 52480.0) in row_set
+    assert "MP2.10" not in aliases
+    assert "MP4.10" not in aliases
+
+
+def test_main_price_list_page_95_skips_contact_configuration_alias_garbage(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p95.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 95, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+    aliases = {alias for alias, _ in rows}
+
+    assert ("417150", 610.0) in row_set
+    assert ("417151", 610.0) in row_set
+    assert ("417153", 940.0) in row_set
+    assert ("417158", 610.0) in row_set
+
+    for bad_alias in {"2NO", "2NC", "4NO", "4NC", "1NO", "1NC"}:
+        assert bad_alias not in aliases
+
+
+def test_main_price_list_page_114_uses_mrp_not_nominal_rating(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p114.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 114, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = dict(rows)
+
+    assert row_dict.get("408848") == 1267.0
+    assert ("408848", 60.0) not in rows
+
+
+def test_main_price_list_page_138_skips_blank_mrp_rows(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p138.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 138, out_xlsx)
+    aliases = _read_aliases(out_xlsx)
+
+    assert "001956" not in aliases
+
+
+def test_main_price_list_pages_154_to_156_keep_split_alias_rows(tmp_path: Path) -> None:
+    expected = {
+        154: {("AC21104MW", 264.0), ("AC21102MW", 488.0), ("AC20109MW", 3444.0), ("AC23107MW", 648.0)},
+        155: {("AC24103MW", 1996.0), ("AC24105MW", 12810.0)},
+        156: {("AC23105MW", 3070.0)},
+    }
+
+    for page, expected_rows in expected.items():
+        out_xlsx = tmp_path / f"main_price_list_2026_p{page}.xlsx"
+        _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", page, out_xlsx)
+        rows = _read_alias_purchase(out_xlsx)
+        row_set = {(alias, purchase) for alias, purchase in rows}
+        for expected_row in expected_rows:
+            assert expected_row in row_set
+
+
 def test_sample_4_page_53_avoids_current_leak_for_alias_669198(tmp_path: Path) -> None:
     """When alias has competing candidates, prefer MRP over rated-current leakage."""
     out_xlsx = tmp_path / "sample_4_p53.xlsx"

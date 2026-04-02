@@ -53,12 +53,41 @@ def first_non_empty_row(matrix: list[list[str]]) -> list[str]:
     return []
 
 
-def detect_header_row_index(matrix: list[list[str]], scan_rows: int = 12) -> int:
+def _header_following_data_signal(
+    matrix: list[list[str]],
+    row_idx: int,
+    lookahead_rows: int = 8,
+) -> int:
+    """Count how many nearby rows look like actual table data after a header.
+
+    This helps prefer the header that anchors the larger real table block when
+    a later subsection header is also present on the same extracted matrix.
+    """
+    end_idx = min(len(matrix), row_idx + 1 + lookahead_rows)
+    signal = 0
+    for data_idx in range(row_idx + 1, end_idx):
+        row = matrix[data_idx]
+        non_empty = [cell.strip() for cell in row if cell.strip()]
+        if len(non_empty) < 2:
+            continue
+
+        alias_like = sum(1 for cell in non_empty if looks_like_alias_line(cell))
+        numeric_like = sum(1 for cell in non_empty if parse_price(cell) is not None)
+        if alias_like >= 1 and numeric_like >= 1:
+            signal += 1
+            continue
+        if numeric_like >= 2:
+            signal += 1
+    return signal
+
+
+def detect_header_row_index(matrix: list[list[str]], scan_rows: int = 32) -> int:
     """Pick the best header anchor row among the first rows of a table.
 
     Many catalogs place bullet text or section labels above the table. This
-    function scores candidate rows after header enrichment and prefers rows
-    that strongly match alias/purchase header roles.
+    function scans a generous preamble window, scores candidate rows after
+    header enrichment, and prefers rows that strongly match alias/purchase
+    header roles.
     """
     if not matrix:
         return 0
@@ -93,13 +122,20 @@ def detect_header_row_index(matrix: list[list[str]], scan_rows: int = 12) -> int
             for s in (alias_best, purchase_best, particulars_best, pack_best)
             if s >= 70
         )
+        following_data_signal = _header_following_data_signal(matrix, row_idx)
 
         # Prioritize alias+purchase confidence; use role coverage and column
         # density as tie-breakers. Prefer earlier rows on near-ties since
         # catalog headers are at the top.
-        score = (alias_best + purchase_best) * 3 + (particulars_best + pack_best) + role_hits * 80 + non_empty * 5
+        score = (
+            (alias_best + purchase_best) * 3
+            + (particulars_best + pack_best)
+            + role_hits * 80
+            + non_empty * 5
+            + following_data_signal * 40
+        )
 
-        if score > best_score + 10 or (score >= best_score and row_idx <= best_idx):
+        if score > best_score + 100 or (score >= best_score and row_idx <= best_idx):
             best_score = score
             best_idx = row_idx
 

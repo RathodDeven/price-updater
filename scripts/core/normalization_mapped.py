@@ -12,7 +12,9 @@ from core.normalization_helpers import (
     extract_last_numeric_price,
     extract_trailing_text_price,
     inline_alias_price_pair,
+    is_strong_alias_candidate,
     is_current_like_purchase,
+    leading_alias_from_text,
     looks_like_pack_token,
     mixed_text_alias_price_pair,
 )
@@ -25,6 +27,11 @@ from core.parsing import (
     parse_price,
 )
 from core.text_utils import fallback_particulars, split_cell_lines
+
+PACK_CONTEXT_PATTERN = re.compile(
+    r"\b(pack|packing|set(?:s)?|consisting|module(?:s)?|nos?\.?|pcs?\.?|pieces?)\b",
+    flags=re.IGNORECASE,
+)
 
 
 def extract_with_mappings(
@@ -52,6 +59,12 @@ def extract_with_mappings(
             particulars_raw = ""
             if "particulars" in mapping and mapping["particulars"] < len(row):
                 particulars_raw = row[mapping["particulars"]].strip()
+
+            allow_numeric_alias = force_numeric_alias or (
+                scored_headers is not None
+                and mapping["alias"] < len(scored_headers)
+                and has_alias_header_evidence(scored_headers[mapping["alias"]])
+            )
 
             purchase_header_evidence_for_mapping = (
                 scored_headers is not None
@@ -234,7 +247,17 @@ def extract_with_mappings(
             ):
                 continue
 
-            particulars_alias = alias_group_from_text(particulars_raw, looks_like_alias) if particulars_raw else None
+            particulars_leading_alias = (
+                leading_alias_from_text(particulars_raw, allow_numeric=allow_numeric_alias) if particulars_raw else None
+            )
+            if particulars_leading_alias and not is_strong_alias_candidate(
+                particulars_leading_alias,
+                allow_numeric=allow_numeric_alias,
+            ):
+                particulars_leading_alias = None
+            particulars_alias = particulars_leading_alias
+            if particulars_alias is None and particulars_raw:
+                particulars_alias = alias_group_from_text(particulars_raw, looks_like_alias)
 
             has_alias_line_evidence = looks_like_alias_line(alias_raw) or bool(
                 re.search(r"\d{3,6}[ \t]\d{2,6}", alias_raw)
@@ -256,12 +279,6 @@ def extract_with_mappings(
                     if not re.search(r"\d{2,}", weak_alias):
                         continue
 
-            allow_numeric_alias = force_numeric_alias or (
-                scored_headers is not None
-                and mapping["alias"] < len(scored_headers)
-                and has_alias_header_evidence(scored_headers[mapping["alias"]])
-            )
-
             alias = extract_alias(alias_raw, allow_numeric=allow_numeric_alias)
 
             if not alias and purchase is not None and particulars_alias is not None:
@@ -271,12 +288,31 @@ def extract_with_mappings(
             if (
                 alias
                 and purchase is not None
-                and particulars_alias is not None
-                and particulars_alias != alias
-                and re.match(r"^\s*\d{3,6}[ \t]\d{2,6}\b", particulars_raw)
+                and particulars_leading_alias is not None
+                and particulars_leading_alias != alias
             ):
-                alias = particulars_alias
-                allow_numeric_alias = True
+                prev_alias = ""
+                if row_idx > 0:
+                    prev_row = data_rows[row_idx - 1]
+                    prev_alias_raw = prev_row[mapping["alias"]].strip() if mapping["alias"] < len(prev_row) else ""
+                    prev_alias = extract_alias(prev_alias_raw, allow_numeric=allow_numeric_alias)
+
+                # Only let a leading particulars alias override a mapped alias
+                # when the alias column is weak/blank or clearly stale from the
+                # prior row. This preserves true Cat.Nos while still fixing
+                # shifted rows where Camelot leaves the previous Cat.No in the
+                # alias column and the new one starts the description.
+                alias_is_stale_repeat = bool(prev_alias and prev_alias == alias)
+                particulars_digit_count = sum(ch.isdigit() for ch in particulars_leading_alias)
+                alias_digit_count = sum(ch.isdigit() for ch in alias)
+                particulars_is_at_least_as_catalog_dense = particulars_digit_count >= alias_digit_count
+                if (
+                    not has_alias_line_evidence
+                    or alias_is_stale_repeat
+                    or particulars_is_at_least_as_catalog_dense
+                ):
+                    alias = particulars_leading_alias
+                    allow_numeric_alias = True
 
             inline_pair = inline_alias_price_pair(alias_raw, looks_like_alias)
             if inline_pair is not None:
@@ -314,7 +350,8 @@ def extract_with_mappings(
                     prev_has_alias = any(looks_like_alias_line(line) for line in prev_lines) or bool(
                         re.search(r"\d{3,6}[ \t]\d{2,6}", prev_alias_raw)
                     )
-                    if not prev_has_alias:
+                    prev_has_text = bool(re.search(r"[A-Za-z]", prev_alias_raw))
+                    if purchase is None and not prev_has_alias and not prev_has_text:
                         prev_candidates: list[float] = []
                         for line in prev_lines:
                             parsed_prev = parse_price(line.strip())
@@ -324,7 +361,6 @@ def extract_with_mappings(
                             prev_non_current = [v for v in prev_candidates if not is_current_like_purchase(v)]
                             if prev_non_current:
                                 purchase = max(prev_non_current)
-
                     if purchase is None and not prev_has_alias:
                         prev_price_raw = (
                             prev_row[mapping["purchase"]].strip() if mapping["purchase"] < len(prev_row) else ""
@@ -333,7 +369,11 @@ def extract_with_mappings(
                         if prev_price is not None and prev_price >= 50:
                             purchase = prev_price
 
-            if purchase is None and alias and (particulars_raw or between_raw):
+            pack_context_in_text = any(PACK_CONTEXT_PATTERN.search(text or "") for text in (particulars_raw, between_raw))
+            can_salvage_trailing_text_price = not (
+                purchase_header_evidence_for_mapping and not price_raw and bool(mapped_pack_raw) and pack_context_in_text
+            )
+            if purchase is None and alias and can_salvage_trailing_text_price and (particulars_raw or between_raw):
                 for candidate_text in (particulars_raw, between_raw):
                     if not candidate_text:
                         continue
@@ -387,14 +427,29 @@ def extract_with_mappings(
                         used.add(mapping["pack"])
                     particulars = fallback_particulars(row, used)
 
-            normalized.append(
-                NormalizedRow(
-                    particulars=particulars,
-                    alias=alias,
-                    purchase=round(purchase, 2),
-                    pack=pack,
-                    source_page=page_number,
+            alias_candidates: list[str] = []
+            for alias_line in split_cell_lines(alias_raw):
+                line_alias = extract_alias(alias_line, allow_numeric=allow_numeric_alias)
+                if not looks_like_alias(line_alias, allow_numeric=allow_numeric_alias):
+                    continue
+                if not is_strong_alias_candidate(line_alias, allow_numeric=allow_numeric_alias):
+                    continue
+                if line_alias not in alias_candidates:
+                    alias_candidates.append(line_alias)
+            if not alias_candidates:
+                alias_candidates = [alias]
+            elif alias not in alias_candidates:
+                alias_candidates.insert(0, alias)
+
+            for alias_candidate in alias_candidates:
+                normalized.append(
+                    NormalizedRow(
+                        particulars=particulars,
+                        alias=alias_candidate,
+                        purchase=round(purchase, 2),
+                        pack=pack,
+                        source_page=page_number,
+                    )
                 )
-            )
 
     return normalized

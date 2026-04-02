@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from core.parsing import parse_price
+from core.parsing import extract_alias, looks_like_alias, parse_price
 from core.text_utils import split_cell_lines
 
 
@@ -34,6 +34,7 @@ CURRENT_LIKE_PURCHASES = {
     40.0,
     50.0,
     54.0,
+    60.0,
     63.0,
     65.0,
     70.0,
@@ -167,3 +168,42 @@ def alias_group_from_text(text: str, looks_like_alias_fn) -> str | None:
             if looks_like_alias_fn(alias_candidate, allow_numeric=True):
                 return alias_candidate
     return None
+
+
+def leading_alias_from_text(text: str, allow_numeric: bool = False) -> str | None:
+    """Extract a leading alias token/group from mixed descriptive text."""
+    for line in split_cell_lines(text):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        numeric_match = re.match(r"^(\d{3,6}[ \t]\d{2,6})\b", stripped)
+        if numeric_match and allow_numeric:
+            candidate = extract_alias(numeric_match.group(1), allow_numeric=True)
+            if looks_like_alias(candidate, allow_numeric=True):
+                return candidate
+
+        token_match = re.match(r"^([A-Za-z0-9][A-Za-z0-9\-_/\.]{2,})\b", stripped)
+        if not token_match:
+            continue
+        candidate = extract_alias(token_match.group(1), allow_numeric=allow_numeric)
+        if looks_like_alias(candidate, allow_numeric=allow_numeric):
+            return candidate
+    return None
+
+
+def is_strong_alias_candidate(alias: str, allow_numeric: bool = False) -> bool:
+    """Return True for alias shapes strong enough to override mapped drift."""
+    if not looks_like_alias(alias, allow_numeric=allow_numeric):
+        return False
+    if alias.isdigit():
+        return allow_numeric and len(alias) >= 5
+
+    # Reject electrical ratings/ranges such as 6/16A or 1.5-2.5KV.
+    if re.fullmatch(r"\d+(?:[./-]\d+)+(?:[A-Za-z]{1,3})?", alias, flags=re.IGNORECASE):
+        return False
+    if re.fullmatch(r"\d+(?:\.\d+)?[A-Za-z]{1,3}(?:[/-]\d+(?:\.\d+)?[A-Za-z]{1,3})+", alias, flags=re.IGNORECASE):
+        return False
+
+    digit_count = sum(ch.isdigit() for ch in alias)
+    return digit_count >= 3 or len(alias) >= 6

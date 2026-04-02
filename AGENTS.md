@@ -45,6 +45,7 @@ Repository agent rules for `price-updater`.
 - IP protection ratings (IP20, IP54, etc.) are not product codes.
 - Fuzzy header matching must penalize very short normalized headers (< 3 chars) to prevent `(A)` → `"a"` from matching `"purchase"` or `"rate"` at 100%.
 - Header enrichment uses `lookback_rows=4` to capture multi-row header labels (e.g. "MRP*" 2 rows above "Cat.Nos"), but header detection (`detect_header_row_index`) uses `lookback_rows=1` internally to keep anchor row stable.
+- Header detection should scan deep enough to reach real table headers below long bullet/spec preambles (for example ~20 rows), while still using `lookback_rows=1` and `lookahead_rows=0` during anchor selection so early text rows do not inherit header evidence.
 - Header detection prefers earlier rows on near-ties (within 10 score points) since catalog headers appear at the top of tables.
 - Backtick (`` ` ``) in headers should normalize to `inr` (same as `₹`), since some PDFs render the rupee symbol as a backtick.
 - Fuzzy header matching must use word-boundary checks: `partial_ratio("rated current a", "rate")` = 100 is a false positive. Require the keyword to appear as a whole word in the header text (not a substring of a longer word). Matches that only come from fuzzy scoring without word-boundary evidence should be penalized (cap at 70% of raw score).
@@ -65,6 +66,10 @@ Repository agent rules for `price-updater`.
 - When recovering MRP from the end of particulars/description text, only accept a standalone trailing numeric token (e.g. `..., 32970`), not digits embedded inside a product code suffix (e.g. `5ST3070`).
 - In mapped rows where purchase cell is pack-like (`1`, `5/10`, etc.) and alias is valid, check particulars/intermediate between-columns for a trailing standalone price and prefer it as MRP; treat purchase-cell token as shifted pack.
 - Nearby-column MRP recovery (when mapped purchase cell is blank) must only consider purchase-header-evidenced columns near alias, and should ignore candidates that are only current-like values.
+- In mapped continuation rows where the Cat.No sits at the start of particulars/description text (for example `AC21104MW ...`) and the mapped alias column is blank or stale, salvage that leading alias generically instead of dropping the row.
+- Previous-row purchase salvage must prefer the mapped purchase column over alias-column numerics, and alias-column salvage should ignore text-bearing cells; otherwise continuation text like `... 625018` or nominal ratings like `60` can be misread as MRP.
+- If a mapped purchase cell is blank while a separate pack column is populated, do not infer MRP from trailing description numerics by default; values like `Pack consisting of 100` are pack/quantity text, not price.
+- When emitting multiple aliases from one mapped multiline alias cell, only emit extra line-level aliases that are strong catalog-code candidates; configuration text like `2 NO`, `2 NC`, `4 NO`, `1 NC` must not become aliases.
 
 ## Change Discipline
 - Make smallest viable changes.
@@ -180,5 +185,3 @@ If a file approaches 400 lines (or starts mixing concerns):
 - Verify row counts match pre-refactor baselines
 - Check zero Pylance errors: `pylance check scripts/`
 - Profile impact of new modules on load time (should be negligible)
-
-*** End Patch

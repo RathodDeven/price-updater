@@ -161,6 +161,11 @@ The extractor currently handles these generic table patterns:
 25. Reversed MRP-before-alias stacking (e.g. `1800\n4242 11`) is recognised by the stream parser
 26. Cross-line alias groups prevented — only horizontal whitespace (space/tab) separates alias digit groups, not newlines
 27. Adjacent-cell stream fallback now ignores price candidates from alphabetic description cells (for example `... Cover Joint 75`) so numeric suffixes in text do not override real MRP columns
+28. Split mapped rows with the Cat.No at the start of the particulars/description cell now recover leading alphanumeric aliases (for example `AC21104MW ...`) instead of dropping those rows
+29. Previous-row purchase salvage now prefers the mapped MRP column and ignores descriptive alias-column text blocks, preventing alias/purchase inversion on continuation rows
+30. When a mapped MRP cell is blank but a separate pack column is populated, trailing numerics in description text are no longer promoted to purchase by default
+31. Header detection scans deeper into long table preambles, so real Cat.Nos/MRP header rows below feature bullets are mapped instead of falling back to headerless parsing
+32. Extra alias emission from mapped multiline cells now requires a strong catalog-code shape, so contact-configuration labels such as `2 NO`/`4 NC` are not exported as aliases
 
 This also covers mixed rows where several Cat.Nos are listed first but only the last one or two have visible MRP values (for example some variants are price-on-request while later variants have explicit MRP).
 
