@@ -50,6 +50,9 @@ Repository agent rules for `price-updater`.
 - Backtick (`` ` ``) in headers should normalize to `inr` (same as `₹`), since some PDFs render the rupee symbol as a backtick.
 - Fuzzy header matching must use word-boundary checks: `partial_ratio("rated current a", "rate")` = 100 is a false positive. Require the keyword to appear as a whole word in the header text (not a substring of a longer word). Matches that only come from fuzzy scoring without word-boundary evidence should be penalized (cap at 70% of raw score).
 - When Camelot merges multiple PDF columns into one cell (dual-role columns), the merged column may contain both alias and purchase evidence (e.g. "Cat.Nos Pack MRP*/₹/Unit"). If no non-alias purchase candidate has purchase header evidence, allow dual-role alias columns with purchase evidence to serve as the purchase source for other alias columns.
+- Merged spread headers like `Cat.Nos Description` should still count as alias headers when explicit alias-marker evidence exists, even if particulars scores equally.
+- If one header cell carries both alias and purchase evidence, allow a dual-role `alias == purchase` mapping and parse same-cell alphanumeric alias+MRP stacks generically.
+- Do not reject mapped alias cells just because the description text contains current markers like `10A` or `16A` when the cell starts with a strong catalog alias.
 - Header detection (`detect_header_row_index`) uses `lookahead_rows=0` so that a row ABOVE the actual header cannot steal role evidence from rows below it via lookahead. The actual enrichment after detection still uses `lookback_rows=4` and `lookahead_rows=2`.
 - Stacked purchase cells (e.g. "15670\n1\n-\n-\n-" where MRP is first, followed by pack and 4P data) must be parsed by splitting on `\n` and taking the first valid price ≥ 50. `parse_price()` alone rejects these as multi-chunk. Fix is in `_extract_with_mappings` in `normalization.py`.
 - When the main header-mapping path succeeds, compact_vertical rows are still merged in (not bypassed) so that stacked-cell pack values can upgrade pack-less rows from the header path.
@@ -68,6 +71,7 @@ Repository agent rules for `price-updater`.
 - Nearby-column MRP recovery (when mapped purchase cell is blank) must only consider purchase-header-evidenced columns near alias, and should ignore candidates that are only current-like values.
 - In mapped continuation rows where the Cat.No sits at the start of particulars/description text (for example `AC21104MW ...`) and the mapped alias column is blank or stale, salvage that leading alias generically instead of dropping the row.
 - Previous-row purchase salvage must prefer the mapped purchase column over alias-column numerics, and alias-column salvage should ignore text-bearing cells; otherwise continuation text like `... 625018` or nominal ratings like `60` can be misread as MRP.
+- Continuation-row purchase salvage may use the adjacent mapped purchase value even when the continuation row still has description text in the alias column or pack in the pack column, as long as that continuation row has no strong alias of its own.
 - If a mapped purchase cell is blank while a separate pack column is populated, do not infer MRP from trailing description numerics by default; values like `Pack consisting of 100` are pack/quantity text, not price.
 - When emitting multiple aliases from one mapped multiline alias cell, only emit extra line-level aliases that are strong catalog-code candidates; configuration text like `2 NO`, `2 NC`, `4 NO`, `1 NC` must not become aliases.
 

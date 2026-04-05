@@ -235,13 +235,18 @@ def build_column_mappings(headers: list[str]) -> list[dict[str, int]]:
         role: [header_role_score(h, role) for h in headers] for role in ACTIVE_ROLE_SYNONYMS
     }
 
-    alias_cols = [
-        i
-        for i, s in enumerate(scores_by_role["alias"])
-        if s >= 70
-        and s >= scores_by_role["particulars"][i] + 8
-        and not (scores_by_role["pack"][i] >= 90 and scores_by_role["pack"][i] > s)
-    ]
+    alias_cols = []
+    for i, s in enumerate(scores_by_role["alias"]):
+        if s < 70:
+            continue
+        if scores_by_role["pack"][i] >= 90 and scores_by_role["pack"][i] > s:
+            continue
+
+        # Stream extraction commonly merges "Cat.Nos" with "Description" or
+        # even "MRP" into one header cell. Keep explicit alias-marker columns
+        # in play instead of discarding them on score ties.
+        if s >= scores_by_role["particulars"][i] + 8 or has_alias_header_evidence(headers[i]):
+            alias_cols.append(i)
     alias_evidence_cols = [i for i in alias_cols if has_alias_header_evidence(headers[i])]
     if alias_evidence_cols:
         alias_cols = alias_evidence_cols
@@ -283,9 +288,23 @@ def build_column_mappings(headers: list[str]) -> list[dict[str, int]]:
         used_purchase: set[int] = set()
         sorted_alias_cols = sorted(alias_cols)
         for idx, alias_idx in enumerate(sorted_alias_cols):
+            next_alias_idx = sorted_alias_cols[idx + 1] if idx + 1 < len(sorted_alias_cols) else None
+            alias_is_dual_role = (
+                has_alias_header_evidence(headers[alias_idx])
+                and has_purchase_header_evidence(headers[alias_idx])
+                and scores_by_role["purchase"][alias_idx] >= 70
+            )
+
             # If aliases outnumber purchase columns, allow reuse of nearest
             # purchase column so multiple color variants can share the same MRP.
-            if len(alias_cols) > len(purchase_cols):
+            if alias_is_dual_role:
+                block_purchase_cols = [
+                    p
+                    for p in purchase_cols
+                    if p >= alias_idx and (next_alias_idx is None or p < next_alias_idx)
+                ]
+                p_idx = nearest_index(alias_idx, block_purchase_cols) or alias_idx
+            elif len(alias_cols) > len(purchase_cols):
                 candidate_purchase = list(purchase_cols)
                 # In shared-price mode, when two purchase columns are equally
                 # close, prefer the purchase column to the right. This avoids
@@ -299,12 +318,11 @@ def build_column_mappings(headers: list[str]) -> list[dict[str, int]]:
                 p_idx = nearest_index(alias_idx, candidate_purchase)
             if p_idx is None:
                 continue
-            if len(alias_cols) <= len(purchase_cols):
+            if len(alias_cols) <= len(purchase_cols) and p_idx in purchase_cols:
                 used_purchase.add(p_idx)
 
             mapping = {"alias": alias_idx, "purchase": p_idx}
             part_idx = nearest_index(alias_idx, particulars_cols)
-            next_alias_idx = sorted_alias_cols[idx + 1] if idx + 1 < len(sorted_alias_cols) else None
             block_pack_cols = [
                 pack_idx
                 for pack_idx in pack_cols

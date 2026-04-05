@@ -166,6 +166,9 @@ The extractor currently handles these generic table patterns:
 30. When a mapped MRP cell is blank but a separate pack column is populated, trailing numerics in description text are no longer promoted to purchase by default
 31. Header detection scans deeper into long table preambles, so real Cat.Nos/MRP header rows below feature bullets are mapped instead of falling back to headerless parsing
 32. Extra alias emission from mapped multiline cells now requires a strong catalog-code shape, so contact-configuration labels such as `2 NO`/`4 NC` are not exported as aliases
+33. Merged spread headers like `Cat.Nos Description` still count as alias headers when explicit Cat.No marker evidence exists, so right-side blocks on two-column spreads are mapped instead of dropped
+34. Dual-role header cells that contain both alias and purchase evidence can emit `alias == purchase` mappings, allowing same-cell alphanumeric alias+MRP stacks such as `AC21104MB ... 306`
+35. Continuation-row purchase salvage now accepts adjacent mapped MRP rows even when the continuation row still carries description text in the alias column or pack in the pack column, provided that continuation row has no strong alias of its own
 
 This also covers mixed rows where several Cat.Nos are listed first but only the last one or two have visible MRP values (for example some variants are price-on-request while later variants have explicit MRP).
 

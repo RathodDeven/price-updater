@@ -392,6 +392,70 @@ def test_main_price_list_pages_154_to_156_keep_split_alias_rows(tmp_path: Path) 
             assert expected_row in row_set
 
 
+def test_main_price_list_page_156_recovers_both_spread_blocks(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p156_spread.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 156, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+    aliases = {alias for alias, _ in rows}
+
+    expected_rows = {
+        ("AC27108MW", 3298.0),
+        ("AC27111MW", 9388.0),
+        ("679255", 234.0),
+        ("076711", 2698.0),
+        ("AC361MW", 9354.0),
+        ("AC20110MW", 11044.0),
+        ("AC22114MW", 812.0),
+        ("AC23115MW", 794.0),
+        ("AC21117MW", 778.0),
+        ("AC23119MW", 778.0),
+        ("AC657MW", 4188.0),
+        ("AC627MW", 6692.0),
+        ("AC20111MW", 1332.0),
+        ("AC20112MW", 1368.0),
+        ("AC628MW", 796.0),
+    }
+
+    for expected_row in expected_rows:
+        assert expected_row in row_set
+
+    assert "2MODULE" not in aliases
+    assert len(rows) >= 28
+
+
+def test_main_price_list_page_157_recovers_merged_right_block(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p157_spread.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 157, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+    aliases = {alias for alias, _ in rows}
+
+    expected_rows = {
+        ("AC625MW", 796.0),
+        ("AC626MW", 796.0),
+        ("AC4430MW", 6684.0),
+        ("AC4421MW", 9306.0),
+        ("AC4411MW", 11044.0),
+        ("AC4400MW", 1180.0),
+        ("AC4452MW", 9484.0),
+        ("AC350MW", 1810.0),
+        ("AC354MW", 576.0),
+        ("AC150MW", 82.0),
+        ("AC153MW", 122.0),
+        ("A1401", 500.0),
+        ("AC21104MB", 306.0),
+        ("AC21106MB", 558.0),
+        ("AC22109MB", 1036.0),
+    }
+
+    for expected_row in expected_rows:
+        assert expected_row in row_set
+
+    assert "2MODULE" not in aliases
+    assert len(rows) >= 33
+
+
 def test_sample_4_page_53_avoids_current_leak_for_alias_669198(tmp_path: Path) -> None:
     """When alias has competing candidates, prefer MRP over rated-current leakage."""
     out_xlsx = tmp_path / "sample_4_p53.xlsx"

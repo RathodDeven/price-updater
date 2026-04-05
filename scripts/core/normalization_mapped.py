@@ -34,6 +34,45 @@ PACK_CONTEXT_PATTERN = re.compile(
 )
 
 
+def _choose_best_price(candidates: list[float]) -> float | None:
+    if not candidates:
+        return None
+    non_current = [value for value in candidates if not is_current_like_purchase(value)]
+    chosen = max(non_current) if non_current else max(candidates)
+    return round(chosen, 2)
+
+
+def _price_candidates_from_text(text: str) -> list[float]:
+    candidates: list[float] = []
+    for line in split_cell_lines(text):
+        parsed = parse_price(line.strip())
+        if parsed is not None and parsed >= 50:
+            candidates.append(parsed)
+    return candidates
+
+
+def _strong_inline_alias(text: str, allow_numeric_alias: bool) -> str | None:
+    alias = leading_alias_from_text(text, allow_numeric=allow_numeric_alias)
+    if alias and is_strong_alias_candidate(alias, allow_numeric=allow_numeric_alias):
+        if re.fullmatch(r"\d+\s*MODULES?", alias, flags=re.IGNORECASE):
+            return None
+        return alias
+    return None
+
+
+def _looks_like_technical_matrix_continuation(text: str) -> bool:
+    lines = split_cell_lines(text)
+    if not lines:
+        return False
+
+    first = lines[0]
+    if re.fullmatch(r"\d+(?:\.\d+)?\s*A", first, flags=re.IGNORECASE):
+        return True
+    if re.match(r"^IEC\s*\d", first, flags=re.IGNORECASE):
+        return True
+    return False
+
+
 def extract_with_mappings(
     data_rows: list[list[str]],
     mappings: list[dict[str, int]],
@@ -103,6 +142,7 @@ def extract_with_mappings(
             if (
                 re.search(r"\b\d+(?:\.\d+)?\s*A\b", alias_raw, flags=re.IGNORECASE)
                 and not re.search(r"\d{4,6}[ \t]\d{2,6}", alias_raw)
+                and _strong_inline_alias(alias_raw, allow_numeric_alias) is None
             ):
                 continue
 
@@ -169,6 +209,62 @@ def extract_with_mappings(
                             source_page=page_number,
                         )
                     )
+
+                same_cell_alias = _strong_inline_alias(alias_raw, allow_numeric_alias)
+                same_cell_purchase = _choose_best_price(_price_candidates_from_text(alias_raw))
+                if (
+                    same_cell_alias
+                    and same_cell_purchase is not None
+                    and not any(
+                        pair_alias == same_cell_alias and round(pair_purchase, 2) == same_cell_purchase
+                        for pair_alias, pair_purchase in stream_pairs
+                    )
+                ):
+                    pack = ""
+                    if include_pack and "pack" in mapping and mapping["pack"] < len(row):
+                        pack = clean_pack(row[mapping["pack"]])
+                    normalized.append(
+                        NormalizedRow(
+                            particulars="",
+                            alias=same_cell_alias,
+                            purchase=same_cell_purchase,
+                            pack=pack,
+                            source_page=page_number,
+                        )
+                    )
+
+                if same_cell_alias and same_cell_purchase is None:
+                    neighbor_purchase = None
+                    for neighbor_idx in (row_idx - 1, row_idx + 1):
+                        if neighbor_idx < 0 or neighbor_idx >= len(data_rows):
+                            continue
+                        neighbor_row = data_rows[neighbor_idx]
+                        neighbor_raw = (
+                            neighbor_row[mapping["alias"]].strip()
+                            if mapping["alias"] < len(neighbor_row)
+                            else ""
+                        )
+                        if not neighbor_raw:
+                            continue
+                        if _strong_inline_alias(neighbor_raw, allow_numeric_alias):
+                            continue
+                        neighbor_purchase = _choose_best_price(_price_candidates_from_text(neighbor_raw))
+                        if neighbor_purchase is not None:
+                            break
+
+                    if neighbor_purchase is not None:
+                        pack = ""
+                        if include_pack and "pack" in mapping and mapping["pack"] < len(row):
+                            pack = clean_pack(row[mapping["pack"]])
+                        normalized.append(
+                            NormalizedRow(
+                                particulars="",
+                                alias=same_cell_alias,
+                                purchase=neighbor_purchase,
+                                pack=pack,
+                                source_page=page_number,
+                            )
+                        )
                 continue
 
             mixed_pair: tuple[str, float] | None = None
@@ -262,13 +358,14 @@ def extract_with_mappings(
             has_alias_line_evidence = looks_like_alias_line(alias_raw) or bool(
                 re.search(r"\d{3,6}[ \t]\d{2,6}", alias_raw)
             )
+            leading_inline_alias = _strong_inline_alias(alias_raw, allow_numeric_alias) if alias_raw else None
             if not has_alias_line_evidence:
                 alias_lines = split_cell_lines(alias_raw)
                 has_alias_line_evidence = any(looks_like_alias_line(line) for line in alias_lines)
             if not has_alias_line_evidence:
                 weak_alias = extract_alias(alias_raw, allow_numeric=True)
                 has_particulars_salvage = purchase is not None and particulars_alias is not None
-                if mixed_pair is None and not has_particulars_salvage:
+                if mixed_pair is None and not has_particulars_salvage and leading_inline_alias is None:
                     # Guard against section headings in mapped alias columns
                     # (for example "Double pole 240V") being promoted into
                     # synthetic aliases when purchase is salvaged nearby.
@@ -276,7 +373,7 @@ def extract_with_mappings(
                     has_split_numeric_group = bool(re.search(r"\d{3,6}[ \t]\d{2,6}", alias_raw))
                     if multiword_alias_text and not has_split_numeric_group:
                         continue
-                    if not re.search(r"\d{2,}", weak_alias):
+                    if not is_strong_alias_candidate(weak_alias, allow_numeric=True):
                         continue
 
             alias = extract_alias(alias_raw, allow_numeric=allow_numeric_alias)
@@ -329,7 +426,14 @@ def extract_with_mappings(
                         purchase = stacked_price
                         break
 
-            if purchase is None and (alias_raw or particulars_alias) and row_idx + 1 < len(data_rows):
+            salvage_alias = alias or particulars_alias
+            alias_is_strong = (
+                is_strong_alias_candidate(salvage_alias, allow_numeric=allow_numeric_alias)
+                if salvage_alias
+                else False
+            )
+
+            if purchase is None and alias_is_strong and (alias_raw or particulars_alias) and row_idx + 1 < len(data_rows):
                 next_row = data_rows[row_idx + 1]
                 next_alias_raw = next_row[mapping["alias"]].strip() if mapping["alias"] < len(next_row) else ""
                 next_price_raw = next_row[mapping["purchase"]].strip() if mapping["purchase"] < len(next_row) else ""
@@ -337,12 +441,21 @@ def extract_with_mappings(
                 next_pack_raw = ""
                 if "pack" in mapping and mapping["pack"] < len(next_row):
                     next_pack_raw = next_row[mapping["pack"]].strip()
-                if next_purchase is not None and not next_alias_raw and not next_pack_raw:
+                next_has_strong_alias = _strong_inline_alias(next_alias_raw, allow_numeric_alias) is not None
+                next_is_technical = _looks_like_technical_matrix_continuation(next_alias_raw)
+                if (
+                    next_purchase is not None
+                    and not next_has_strong_alias
+                    and not next_is_technical
+                    and not is_current_like_purchase(next_purchase)
+                ):
                     purchase = next_purchase
+                    if not shifted_pack_override and clean_pack(next_pack_raw):
+                        shifted_pack_override = clean_pack(next_pack_raw)
 
             # Variant of split-row layouts: alias appears on current row while
             # MRP is stacked in the previous row in the same alias column.
-            if purchase is None and alias and row_idx > 0:
+            if purchase is None and alias_is_strong and alias and row_idx > 0:
                 prev_row = data_rows[row_idx - 1]
                 prev_alias_raw = prev_row[mapping["alias"]].strip() if mapping["alias"] < len(prev_row) else ""
                 if prev_alias_raw:
@@ -366,8 +479,17 @@ def extract_with_mappings(
                             prev_row[mapping["purchase"]].strip() if mapping["purchase"] < len(prev_row) else ""
                         )
                         prev_price = parse_price(prev_price_raw)
-                        if prev_price is not None and prev_price >= 50:
+                        if (
+                            prev_price is not None
+                            and prev_price >= 50
+                            and not _looks_like_technical_matrix_continuation(prev_alias_raw)
+                        ):
                             purchase = prev_price
+                if purchase is None and not prev_alias_raw:
+                    prev_price_raw = prev_row[mapping["purchase"]].strip() if mapping["purchase"] < len(prev_row) else ""
+                    prev_price = parse_price(prev_price_raw)
+                    if prev_price is not None and prev_price >= 50 and not is_current_like_purchase(prev_price):
+                        purchase = prev_price
 
             pack_context_in_text = any(PACK_CONTEXT_PATTERN.search(text or "") for text in (particulars_raw, between_raw))
             can_salvage_trailing_text_price = not (
