@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from core.parsing import extract_alias
+from core.normalization_helpers import is_strong_alias_candidate
 
 
 def test_extract_alias_strips_trailing_digit_footnote_marker() -> None:
@@ -32,3 +33,14 @@ def test_extract_alias_strips_flattened_numeric_footnote_suffix() -> None:
 
 def test_extract_alias_keeps_regular_spaced_numeric_codes() -> None:
     assert extract_alias("4122 270", allow_numeric=True) == "4122270"
+
+
+def test_extract_alias_preserves_alphanumeric_suffix_after_spaced_numeric_prefix() -> None:
+    assert extract_alias("5757 12PL", allow_numeric=True) == "575712PL"
+    assert extract_alias("5758 34PL", allow_numeric=True) == "575834PL"
+
+
+def test_is_strong_alias_candidate_rejects_descriptive_word_number_tokens() -> None:
+    assert is_strong_alias_candidate("SOCKET-3", allow_numeric=True) is False
+    assert is_strong_alias_candidate("WAY-1", allow_numeric=True) is False
+    assert is_strong_alias_candidate("MODULE-2", allow_numeric=True) is False

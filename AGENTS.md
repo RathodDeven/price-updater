@@ -40,6 +40,7 @@ Repository agent rules for `price-updater`.
 - When multiple candidates map to the same `(alias, purchase)`, keep the higher-quality row.
 - In stacked cells containing Cat.No + intermediate values + MRP (e.g. `4166 86\n18\n25\n4430`), take the LAST valid price (≥ MIN_PURCHASE), not the first — intermediate values are current ratings, not MRP.
 - Alias group regex must use `[ \t]` (horizontal whitespace), NOT `\s`, to avoid cross-line matching that creates garbage aliases from adjacent lines (e.g. `7000\n4240` → `70004240`).
+- Alias-group detection for spaced numeric Cat.Nos must require token boundaries (for example `\b\d{3,6}[ \t]\d{2,6}\b`) so partial groups inside alphanumeric aliases (e.g. `5757 12PL`) are not truncated to numeric-only aliases (`575712`).
 - When a cell contains a price-on-request marker (■/`\uf06e`/`\u25a0`), treat MRP as unavailable and skip the row.
 - In mixed-layout cells, do not accept the concatenated text as an alias when no individual token qualifies — prevents description text becoming aliases.
 - IP protection ratings (IP20, IP54, etc.) are not product codes.
@@ -68,12 +69,17 @@ Repository agent rules for `price-updater`.
 - In shifted rows where alias column repeats the previous Cat.No but particulars starts with a new Cat.No (e.g. alias `5734 50` vs particulars `5734 51 ...`), prefer the leading particulars alias when purchase is valid.
 - When recovering MRP from the end of particulars/description text, only accept a standalone trailing numeric token (e.g. `..., 32970`), not digits embedded inside a product code suffix (e.g. `5ST3070`).
 - In mapped rows where purchase cell is pack-like (`1`, `5/10`, etc.) and alias is valid, check particulars/intermediate between-columns for a trailing standalone price and prefer it as MRP; treat purchase-cell token as shifted pack.
+- In mapped purchase cells that inline MRP and pack in one token stream (for example `2220 1/10/100`), parse the leading numeric token as MRP and treat the trailing slash token as pack, instead of dropping the row.
+- When mapped purchase is blank but particulars/intermediate text ends with inline `MRP pack` (for example `... 1736 1/20/200`), prefer the inline MRP (`1736`) before trailing-number fallback so pack suffix (`200`) is not misclassified as purchase.
 - Nearby-column MRP recovery (when mapped purchase cell is blank) must only consider purchase-header-evidenced columns near alias, and should ignore candidates that are only current-like values.
 - In mapped continuation rows where the Cat.No sits at the start of particulars/description text (for example `AC21104MW ...`) and the mapped alias column is blank or stale, salvage that leading alias generically instead of dropping the row.
 - Previous-row purchase salvage must prefer the mapped purchase column over alias-column numerics, and alias-column salvage should ignore text-bearing cells; otherwise continuation text like `... 625018` or nominal ratings like `60` can be misread as MRP.
 - Continuation-row purchase salvage may use the adjacent mapped purchase value even when the continuation row still has description text in the alias column or pack in the pack column, as long as that continuation row has no strong alias of its own.
 - If a mapped purchase cell is blank while a separate pack column is populated, do not infer MRP from trailing description numerics by default; values like `Pack consisting of 100` are pack/quantity text, not price.
 - When emitting multiple aliases from one mapped multiline alias cell, only emit extra line-level aliases that are strong catalog-code candidates; configuration text like `2 NO`, `2 NC`, `4 NO`, `1 NC` must not become aliases.
+- Stream fallback must handle shifted adjacent-cell pairs where an alias appears at the tail of one cell and the MRP appears at the head of the next cell (for example `... 0261 23` then `86160`) so right-block aliases are not dropped or mispaired to previous MRPs.
+- Stream alias-group normalization must apply numeric footnote cleanup for spaced Cat.Nos groups (for example `4122 831` -> `412283`) to prevent flattened superscript markers from producing synthetic aliases like `4122831`.
+- Strong alias salvage must reject descriptive word-number tokens (for example `SOCKET-3`, `WAY-1`, `MODULE-2`) so continuation description fragments with adjacent MRPs cannot be promoted to aliases.
 
 ## Change Discipline
 - Make smallest viable changes.

@@ -11,7 +11,7 @@ from core.quality_scoring import normalized_row_quality
 from core.text_utils import split_cell_lines
 
 
-ALIAS_GROUP_PATTERN = re.compile(r"\d{3,6}[ \t]\d{2,6}")
+ALIAS_GROUP_PATTERN = re.compile(r"\b\d{3,6}[ \t]\d{2,6}\b")
 NUMBER_TOKEN_PATTERN = re.compile(r"(?<![A-Za-z0-9])\d{2,7}(?:,\d{3})*(?:\.\d+)?(?![A-Za-z0-9])")
 
 

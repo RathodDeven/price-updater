@@ -313,6 +313,105 @@ def test_main_price_list_page_46_skips_alias_purchase_inversions(tmp_path: Path)
     assert "48VAC/DC" not in aliases
 
 
+def test_main_price_list_page_62_recovers_shifted_motor_operator_alias_prices(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p62.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 62, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+    row_set = {(alias, purchase) for alias, purchase in rows}
+
+    assert row_dict.get("026126") == 79700.0
+    assert row_dict.get("026123") == 86160.0
+    assert ("026123", 79700.0) not in row_set
+    assert row_dict.get("026141") == 78130.0
+    assert row_dict.get("026274") == 40440.0
+    assert row_dict.get("421061") == 45700.0
+
+
+def test_main_price_list_page_123_strips_flattened_footnote_alias(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p123.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 123, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("412283") == 83500.0
+    assert "4122831" not in row_dict
+
+
+def test_main_price_list_page_166_rejects_descriptive_socket_alias(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p166.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 166, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("AC1136MW") == 638.0
+    assert row_dict.get("AA27108MT") == 4532.0
+    assert "SOCKET-3" not in row_dict
+
+
+def test_main_price_list_page_219_recovers_compact_two_row_table(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p219.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 219, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("680619") == 4096.0
+    assert row_dict.get("680633") == 1350.0
+
+
+def test_main_price_list_page_229_recovers_cover_plate_rows_with_suffix_aliases(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p229.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 229, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("575712PL") == 348.0
+    assert row_dict.get("575812PL") == 440.0
+    assert row_dict.get("575823PL") == 440.0
+    assert row_dict.get("575834PL") == 440.0
+    assert row_dict.get("064871") == 806.0
+    assert "575712" not in row_dict
+    assert "575812" not in row_dict
+
+
+def test_main_price_list_page_234_recovers_inline_mrp_plus_pack_rows(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p234.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 234, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    # Rows where mapped MRP cell is inline "MRP pack" (e.g. "2220 1/10/100")
+    # should keep the leading MRP value.
+    assert row_dict.get("679207") == 2220.0
+    assert row_dict.get("679242") == 1402.0
+
+
+def test_main_price_list_page_237_prefers_inline_mrp_over_pack_suffix(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p237.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 237, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("679449") == 1736.0
+    assert ("679449", 200.0) not in rows
+    assert row_dict.get("679450") == 1582.0
+    assert row_dict.get("679455") == 1738.0
+    assert row_dict.get("679454") == 2636.0
+    assert row_dict.get("679470") == 2083.0
+
+
+def test_main_price_list_page_235_keeps_shifted_audio_video_rows(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p235.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 235, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("679299") == 7697.0
+    assert row_dict.get("679304") == 3110.0
+    assert row_dict.get("679270") == 1795.0
+    assert row_dict.get("679289") == 3180.0
+
+
 def test_main_price_list_page_44_skips_price_on_request_mccb_grid(tmp_path: Path) -> None:
     out_xlsx = tmp_path / "main_price_list_2026_p44.xlsx"
     _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 44, out_xlsx)

@@ -169,6 +169,12 @@ The extractor currently handles these generic table patterns:
 33. Merged spread headers like `Cat.Nos Description` still count as alias headers when explicit Cat.No marker evidence exists, so right-side blocks on two-column spreads are mapped instead of dropped
 34. Dual-role header cells that contain both alias and purchase evidence can emit `alias == purchase` mappings, allowing same-cell alphanumeric alias+MRP stacks such as `AC21104MB ... 306`
 35. Continuation-row purchase salvage now accepts adjacent mapped MRP rows even when the continuation row still carries description text in the alias column or pack in the pack column, provided that continuation row has no strong alias of its own
+36. Stream parser now handles shifted adjacent cells where one cell ends with an alias and the next cell begins with the MRP (for example `... \n0261 23` followed by `86160`), so right-block aliases are not dropped or mispaired
+37. Stream alias normalization now applies numeric footnote cleanup for spaced Cat.Nos groups (for example `4122 831` -> `412283`), preventing flattened superscript markers from creating synthetic aliases
+38. Strong alias salvage now rejects descriptive `WORD-<small number>` tokens (for example `SOCKET-3`, `WAY-1`, `MODULE-2`) so continuation description lines cannot become synthetic aliases when neighboring rows contain MRP values
+39. Spaced-numeric alias-group detection now requires whole-token boundaries, so alphanumeric Cat.Nos like `5757 12PL` keep their suffix (`575712PL`) instead of being truncated to numeric-only aliases (`575712`)
+40. Mapped purchase cells that inline MRP and pack in one value (for example `2220 1/10/100`) now parse the leading numeric token as MRP and treat the trailing slash token as pack, so those rows are not dropped
+41. When mapped MRP is blank but description text ends with inline `MRP pack` (for example `... 1736 1/20/200`), extraction now prefers the inline MRP (`1736`) and avoids trailing pack suffix leakage (`200`) into purchase
 
 This also covers mixed rows where several Cat.Nos are listed first but only the last one or two have visible MRP values (for example some variants are price-on-request while later variants have explicit MRP).
 

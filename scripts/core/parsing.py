@@ -128,7 +128,7 @@ def extract_alias(value: str, allow_numeric: bool = False) -> str:
         # Handle split numeric aliases like "0281 32" within a single line.
         # Use [ \t] instead of \s to avoid matching across newlines, which
         # would merge unrelated numbers from adjacent lines (e.g. 7000\n4240).
-        for numeric_group in re.findall(r"\d{3,6}[ \t]\d{2,6}", base_value):
+        for numeric_group in re.findall(r"\b\d{3,6}[ \t]\d{2,6}\b", base_value):
             numeric_candidate = normalize_spaced_numeric_alias(numeric_group)
             if looks_like_alias(numeric_candidate, allow_numeric=True):
                 return numeric_candidate

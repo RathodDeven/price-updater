@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from core.parsing import extract_alias, looks_like_alias, parse_price
+from core.parsing import clean_pack, extract_alias, looks_like_alias, parse_price
 from core.text_utils import split_cell_lines
 
 
@@ -104,6 +104,31 @@ def extract_trailing_text_price(text: str) -> float | None:
     return round(parsed, 2)
 
 
+def extract_inline_price_and_pack(text: str) -> tuple[float | None, str]:
+    """Extract leading MRP and trailing pack when both are in one cell.
+
+    Examples:
+    - "2220 1/10/100" -> (2220.0, "1/10/100")
+    - "1284 1/10/100" -> (1284.0, "1/10/100")
+    - "Bell Call ... 1736 1/20/200" -> (1736.0, "1/20/200")
+    """
+    for line in split_cell_lines(text):
+        compact = " ".join(line.split()).strip()
+        if not compact:
+            continue
+        match = re.search(
+            r"(?<!\d)(\d+(?:,\d{3})*(?:\.\d+)?)\s+(\d{1,2}\s*/\s*\d{1,3}(?:\s*/\s*\d{1,3})?)\s*$",
+            compact,
+        )
+        if not match:
+            continue
+        parsed_price = parse_price(match.group(1))
+        if parsed_price is None or parsed_price < 50:
+            continue
+        return round(parsed_price, 2), clean_pack(match.group(2))
+    return None, ""
+
+
 def inline_alias_price_pair(text: str, looks_like_alias_fn) -> tuple[str, float] | None:
     """Extract an inline alias+price pair from one mixed cell when present."""
     best_pair: tuple[str, float] | None = None
@@ -177,6 +202,12 @@ def leading_alias_from_text(text: str, allow_numeric: bool = False) -> str | Non
         if not stripped:
             continue
 
+        alnum_split_match = re.match(r"^(\d{3,6}[ \t]\d{2,6}[A-Za-z]{1,6})\b", stripped)
+        if alnum_split_match and allow_numeric:
+            candidate = extract_alias(alnum_split_match.group(1), allow_numeric=True)
+            if looks_like_alias(candidate, allow_numeric=True):
+                return candidate
+
         numeric_match = re.match(r"^(\d{3,6}[ \t]\d{2,6})\b", stripped)
         if numeric_match and allow_numeric:
             candidate = extract_alias(numeric_match.group(1), allow_numeric=True)
@@ -195,6 +226,10 @@ def leading_alias_from_text(text: str, allow_numeric: bool = False) -> str | Non
 def is_strong_alias_candidate(alias: str, allow_numeric: bool = False) -> bool:
     """Return True for alias shapes strong enough to override mapped drift."""
     if not looks_like_alias(alias, allow_numeric=allow_numeric):
+        return False
+    # Descriptive tokens like SOCKET-3 / WAY-1 / MODULE-2 are not catalog
+    # aliases even though they are alphanumeric with a hyphen.
+    if re.fullmatch(r"[A-Z]{3,}(?:-[A-Z]{2,})*-\d{1,2}", alias, flags=re.IGNORECASE):
         return False
     if alias.isdigit():
         return allow_numeric and len(alias) >= 5

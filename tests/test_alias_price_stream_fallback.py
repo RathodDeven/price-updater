@@ -98,3 +98,37 @@ def test_alias_price_stream_handles_alternating_price_and_alias_lines() -> None:
     assert ("026274", 33700.0) in keys
     assert ("026127", 72480.0) in keys
     assert ("026144", 62010.0) in keys
+
+
+def test_alias_price_stream_recovers_shifted_adjacent_motor_operator_pairs() -> None:
+    matrix = [
+        [
+            "DPX 1600",
+            "Upto 1250 A",
+            "4226 24 14710 4226 25 17870",
+            "-\n-",
+            "\uf06e\n0261 24",
+            "0261 25",
+            "\uf06e\n0261 26",
+            "79700\n0261 23",
+            "86160",
+        ],
+    ]
+
+    rows = extract_alias_price_stream_rows(matrix, page_number=62, min_rows=1)
+    row_dict = {row.alias: row.purchase for row in rows}
+    assert row_dict.get("026126") == 79700.0
+    assert row_dict.get("026123") == 86160.0
+    assert "026124" not in row_dict
+    assert "026125" not in row_dict
+
+
+def test_alias_price_stream_normalizes_flattened_numeric_footnote_alias() -> None:
+    matrix = [
+        ["", "3P+N Right\n100 kA\nYes\n8\n83500\n4122 831"],
+    ]
+
+    rows = extract_alias_price_stream_rows(matrix, page_number=123, min_rows=1)
+    keys = {(r.alias, r.purchase) for r in rows}
+    assert ("412283", 83500.0) in keys
+    assert ("4122831", 83500.0) not in keys

@@ -9,6 +9,7 @@ from core.header import has_alias_header_evidence, has_purchase_header_evidence
 from core.models import NormalizedRow
 from core.normalization_helpers import (
     alias_group_from_text,
+    extract_inline_price_and_pack,
     extract_last_numeric_price,
     extract_trailing_text_price,
     inline_alias_price_pair,
@@ -32,6 +33,7 @@ PACK_CONTEXT_PATTERN = re.compile(
     r"\b(pack|packing|set(?:s)?|consisting|module(?:s)?|nos?\.?|pcs?\.?|pieces?)\b",
     flags=re.IGNORECASE,
 )
+SPACED_ALIAS_EVIDENCE_PATTERN = re.compile(r"\b\d{3,6}[ \t]\d{2,6}(?:[A-Za-z]{1,6})?\b")
 
 
 def _choose_best_price(candidates: list[float]) -> float | None:
@@ -274,6 +276,12 @@ def extract_with_mappings(
                     mixed_pair = mixed_text_alias_price_pair(particulars_raw, looks_like_alias)
 
             purchase = parse_price(price_raw)
+            if purchase is None and price_raw:
+                inline_cell_purchase, inline_cell_pack = extract_inline_price_and_pack(price_raw)
+                if inline_cell_purchase is not None:
+                    purchase = inline_cell_purchase
+                    if not mapped_pack_raw and inline_cell_pack:
+                        shifted_pack_override = inline_cell_pack
 
             if (purchase is None and not price_raw) or (
                 purchase is not None and not purchase_header_evidence_for_mapping
@@ -356,7 +364,7 @@ def extract_with_mappings(
                 particulars_alias = alias_group_from_text(particulars_raw, looks_like_alias)
 
             has_alias_line_evidence = looks_like_alias_line(alias_raw) or bool(
-                re.search(r"\d{3,6}[ \t]\d{2,6}", alias_raw)
+                SPACED_ALIAS_EVIDENCE_PATTERN.search(alias_raw)
             )
             leading_inline_alias = _strong_inline_alias(alias_raw, allow_numeric_alias) if alias_raw else None
             if not has_alias_line_evidence:
@@ -370,7 +378,7 @@ def extract_with_mappings(
                     # (for example "Double pole 240V") being promoted into
                     # synthetic aliases when purchase is salvaged nearby.
                     multiword_alias_text = bool(re.search(r"\s", alias_raw.strip()))
-                    has_split_numeric_group = bool(re.search(r"\d{3,6}[ \t]\d{2,6}", alias_raw))
+                    has_split_numeric_group = bool(SPACED_ALIAS_EVIDENCE_PATTERN.search(alias_raw))
                     if multiword_alias_text and not has_split_numeric_group:
                         continue
                     if not is_strong_alias_candidate(weak_alias, allow_numeric=True):
@@ -417,6 +425,22 @@ def extract_with_mappings(
                 if inline_alias == alias:
                     purchase = inline_purchase
 
+            # In dual-block shifted layouts, a mapped purchase cell can carry
+            # the next block's alias+price stack. If alias cell itself contains
+            # multiple inline alias-price pairs, prefer the pair aligned with
+            # this alias over the shifted mapped purchase.
+            if (
+                alias
+                and purchase is not None
+                and re.search(r"\b\d{3,6}[ \t]\d{2,6}\b", price_raw)
+            ):
+                alias_cell_pairs = _extract_row_pairs(alias_raw)
+                if len(alias_cell_pairs) >= 2:
+                    for pair_alias, pair_purchase in alias_cell_pairs:
+                        if pair_alias == alias:
+                            purchase = pair_purchase
+                            break
+
             purchase_has_header_evidence = purchase_header_evidence_for_mapping
             purchase_is_shared = purchase_usage_count.get(mapping["purchase"], 0) > 1
             if alias and (purchase is None or not purchase_has_header_evidence or purchase_is_shared):
@@ -461,7 +485,7 @@ def extract_with_mappings(
                 if prev_alias_raw:
                     prev_lines = split_cell_lines(prev_alias_raw)
                     prev_has_alias = any(looks_like_alias_line(line) for line in prev_lines) or bool(
-                        re.search(r"\d{3,6}[ \t]\d{2,6}", prev_alias_raw)
+                        SPACED_ALIAS_EVIDENCE_PATTERN.search(prev_alias_raw)
                     )
                     prev_has_text = bool(re.search(r"[A-Za-z]", prev_alias_raw))
                     if purchase is None and not prev_has_alias and not prev_has_text:
@@ -490,6 +514,18 @@ def extract_with_mappings(
                     prev_price = parse_price(prev_price_raw)
                     if prev_price is not None and prev_price >= 50 and not is_current_like_purchase(prev_price):
                         purchase = prev_price
+
+            if purchase is None and alias and (particulars_raw or between_raw):
+                for candidate_text in (particulars_raw, between_raw):
+                    if not candidate_text:
+                        continue
+                    inline_purchase_from_text, inline_pack_from_text = extract_inline_price_and_pack(candidate_text)
+                    if inline_purchase_from_text is None:
+                        continue
+                    purchase = inline_purchase_from_text
+                    if not mapped_pack_raw and inline_pack_from_text and not shifted_pack_override:
+                        shifted_pack_override = inline_pack_from_text
+                    break
 
             pack_context_in_text = any(PACK_CONTEXT_PATTERN.search(text or "") for text in (particulars_raw, between_raw))
             can_salvage_trailing_text_price = not (

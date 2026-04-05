@@ -23,6 +23,10 @@ HEADER_GROUP_MARKERS = {
 }
 
 
+ALIAS_GROUP_PATTERN = re.compile(r"\b\d{3,6}[ \t]\d{2,6}\b")
+NUMERIC_TOKEN_PATTERN = re.compile(r"\b\d{2,7}(?:,\d{3})*(?:\.\d+)?\b")
+
+
 def _normalize_marker(text: str) -> str:
     lowered = str(text).lower().replace("₹", " inr ")
     cleaned = re.sub(r"[^a-z0-9 ]+", " ", lowered)
@@ -43,6 +47,10 @@ def _has_group_marker(text: str, role: str) -> bool:
 
 
 def _find_repeated_header_groups(page: Any) -> list[dict[str, float]]:
+    return _find_header_groups(page, min_groups=2)
+
+
+def _find_header_groups(page: Any, min_groups: int = 1) -> list[dict[str, float]]:
     words = page.get_text("words")
     if not words:
         return []
@@ -60,7 +68,7 @@ def _find_repeated_header_groups(page: Any) -> list[dict[str, float]]:
         header_words.append({"x0": x0, "x1": x1, "y0": y0, "text": text, "normalized": normalized})
 
     alias_words = [w for w in header_words if _has_group_marker(w["text"], "alias")]
-    if len(alias_words) < 2:
+    if len(alias_words) < min_groups:
         return []
 
     groups: list[dict[str, float]] = []
@@ -85,8 +93,12 @@ def _find_repeated_header_groups(page: Any) -> list[dict[str, float]]:
             if candidates:
                 role_positions[role] = min(candidates)
 
-        # particulars is optional for compact price grids (e.g. 3P/4P tables)
+        # particulars is optional for compact price grids.
         if "purchase" not in role_positions or "pack" not in role_positions:
+            continue
+
+        # Header anchors near footer are often disclaimer text, not table headers.
+        if role_positions["y"] > float(page.rect.height) * 0.8:
             continue
 
         if any(
@@ -97,15 +109,102 @@ def _find_repeated_header_groups(page: Any) -> list[dict[str, float]]:
             continue
         groups.append(role_positions)
 
-    if len(groups) < 2:
+    if len(groups) < min_groups:
         return []
 
-    # Two-column spreads should have header groups on roughly the same row.
-    y_values = [g["y"] for g in groups]
-    if max(y_values) - min(y_values) > 40:
-        return []
+    # For repeated spreads, header groups should align on roughly the same row.
+    if min_groups >= 2:
+        y_values = [g["y"] for g in groups]
+        if max(y_values) - min(y_values) > 40:
+            return []
 
     return groups
+
+
+def _matrix_has_alias_price_signal(matrix: list[list[str]]) -> bool:
+    alias_hits = 0
+    for row in matrix:
+        row_text = " ".join(cell for cell in row if cell and cell.strip())
+        if not row_text:
+            continue
+        if not ALIAS_GROUP_PATTERN.search(row_text):
+            continue
+        numeric_candidates: list[float] = []
+        for match in NUMERIC_TOKEN_PATTERN.finditer(row_text):
+            token = match.group(0).replace(",", "")
+            try:
+                value = float(token)
+            except ValueError:
+                continue
+            if 50 <= value <= 500000:
+                numeric_candidates.append(value)
+        if numeric_candidates:
+            alias_hits += 1
+
+    return alias_hits >= 1
+
+
+def _extract_header_anchored_regions(pdf_path: Path, page_num: int) -> list[list[list[str]]]:
+    doc = fitz.open(pdf_path)
+    try:
+        page: Any = doc[page_num]
+        groups = _find_header_groups(page, min_groups=1)
+        if not groups:
+            return []
+
+        width = float(page.rect.width)
+        height = float(page.rect.height)
+        result: list[list[list[str]]] = []
+        seen: set[tuple[tuple[str, ...], ...]] = set()
+
+        for group in groups:
+            alias_x = float(group["alias"])
+            right_anchor = max(float(group.get("particulars", alias_x)), float(group["purchase"]), float(group["pack"]))
+            header_y = float(group["y"])
+
+            camel_header_y = height - header_y
+            left = max(0.0, alias_x - 45.0)
+            right = min(width, right_anchor + 150.0)
+            top = min(height, camel_header_y + 35.0)
+            bottom = max(height * 0.45, camel_header_y - 320.0)
+            if top - bottom < 120.0:
+                bottom = max(0.0, top - 220.0)
+            if right - left < 120.0:
+                right = min(width, left + 220.0)
+
+            area = f"{left:.1f},{top:.1f},{right:.1f},{bottom:.1f}"
+
+            try:
+                tables = camelot.read_pdf(
+                    str(pdf_path),
+                    pages=str(page_num + 1),
+                    flavor="stream",
+                    suppress_stdout=True,
+                    edge_tol=500,
+                    table_areas=[area],
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "Header-anchored stream extraction failed on page %s area=%s: %s",
+                    page_num + 1,
+                    area,
+                    exc,
+                )
+                continue
+
+            for table in tables:
+                data = table.data
+                if not data or not _matrix_has_alias_price_signal(data):
+                    continue
+                key = tuple(tuple(str(cell) for cell in row) for row in data)
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(data)
+
+        return result
+    finally:
+        doc.close()
 
 
 def _extract_repeated_header_regions(pdf_path: Path, page_num: int) -> list[list[list[str]]]:
@@ -214,6 +313,24 @@ def _extract_page_tables_impl(pdf_path: Path, page_num: int, flavor: str) -> tup
 
             if stream_result:
                 page_result = stream_result
+
+            # Some pages contain a small valid price table near the top and a
+            # larger non-price prose block below. Use header-anchored fallback
+            # only when current extraction has no alias+price table signal.
+            has_signal = any(_matrix_has_alias_price_signal(matrix) for matrix in page_result)
+            if not has_signal:
+                anchored_result = _extract_header_anchored_regions(pdf_path, page_num)
+                if anchored_result:
+                    combined: list[list[list[str]]] = []
+                    seen: set[tuple[tuple[str, ...], ...]] = set()
+                    for matrix in page_result + anchored_result:
+                        key = tuple(tuple(str(cell) for cell in row) for row in matrix)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        combined.append(matrix)
+                    if combined:
+                        page_result = combined
 
     return page_num, page_result
 

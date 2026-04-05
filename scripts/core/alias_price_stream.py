@@ -5,12 +5,13 @@ from __future__ import annotations
 import re
 
 from core.models import NormalizedRow
-from core.parsing import clean_pack, looks_like_alias, parse_price
+from core.parsing import clean_pack, looks_like_alias, normalize_spaced_numeric_alias, parse_price
 from core.quality_scoring import normalized_row_quality
 from core.text_utils import split_cell_lines
 
 
 NUMERIC_TOKEN_PATTERN = re.compile(r"\d+(?:\.\d+)?")
+ALIAS_GROUP_PATTERN = re.compile(r"\b\d{3,6}[ \t]\d{2,6}\b")
 MIN_PURCHASE = 50.0
 MAX_PURCHASE = 500000.0
 # Price-on-request markers used in catalogs (■, •, etc.)
@@ -18,7 +19,7 @@ PRICE_ON_REQUEST_CHARS = re.compile(r"[\uf06e\uf0b7\u25a0\u25cf\u2022]")
 
 
 def _normalize_alias(alias_group: str) -> str:
-    return "".join(alias_group.split())
+    return normalize_spaced_numeric_alias(alias_group)
 
 
 def _looks_like_alias_group(first: str, second: str) -> bool:
@@ -35,6 +36,32 @@ def _is_valid_price_token(token: str) -> bool:
     except ValueError:
         return False
     return MIN_PURCHASE <= purchase <= MAX_PURCHASE
+
+
+def _extract_tail_alias_from_cell(text: str) -> str | None:
+    lines = split_cell_lines(text)
+    for line in reversed(lines):
+        alias_groups = ALIAS_GROUP_PATTERN.findall(line)
+        if not alias_groups:
+            continue
+        alias = _normalize_alias(alias_groups[-1])
+        if looks_like_alias(alias, allow_numeric=True):
+            return alias
+    return None
+
+
+def _extract_leading_price_from_cell(text: str) -> float | None:
+    for line in split_cell_lines(text):
+        if PRICE_ON_REQUEST_CHARS.search(line):
+            continue
+        if ALIAS_GROUP_PATTERN.search(line):
+            return None
+        if re.search(r"[A-Za-z]", line):
+            continue
+        parsed = parse_price(line)
+        if parsed is not None and MIN_PURCHASE <= parsed <= MAX_PURCHASE:
+            return round(parsed, 2)
+    return None
 
 
 def _extract_inline_triplets(tokens: list[str]) -> list[tuple[str, float]]:
@@ -141,18 +168,37 @@ def _extract_adjacent_cell_pairs(row_cells: list[str]) -> list[tuple[str, float]
     for idx in range(len(row_cells) - 1):
         alias_raw = row_cells[idx]
         price_raw = row_cells[idx + 1]
-        alias_tokens = alias_raw.split()
-        if len(alias_tokens) != 2:
+        alias = _extract_tail_alias_from_cell(alias_raw)
+        if alias is None:
             continue
-        first, second = alias_tokens
-        if not _looks_like_alias_group(first, second):
+
+        self_pairs = _extract_row_pairs(alias_raw)
+        self_pair_aliases = {pair_alias for pair_alias, _ in self_pairs}
+        alias_lines = split_cell_lines(alias_raw)
+        starts_with_price = False
+        if alias_lines:
+            first_line_price = parse_price(alias_lines[0])
+            starts_with_price = first_line_price is not None and first_line_price >= MIN_PURCHASE
+        if alias in self_pair_aliases and not starts_with_price:
             continue
-        alias = _normalize_alias(alias_raw)
-        if not looks_like_alias(alias, allow_numeric=True):
+
+        alias_is_simple_group = bool(re.fullmatch(r"\b\d{3,6}[ \t]\d{2,6}\b", alias_raw))
+        alias_is_complex = (
+            not alias_is_simple_group
+            or "\n" in alias_raw
+            or bool(PRICE_ON_REQUEST_CHARS.search(alias_raw))
+            or starts_with_price
+        )
+
+        if alias_is_complex:
+            purchase = _extract_leading_price_from_cell(price_raw)
+            if purchase is None:
+                continue
+            pairs.append((alias, purchase))
             continue
-        # Adjacent-cell fallback should only trust price cells that are mostly
-        # numeric. This avoids pulling trailing numbers from descriptions like
-        # "... Cover Joint 75" when the real MRP exists in another column.
+
+        # Preserve strict behavior for simple alias-only cells so packed
+        # price+pack stacks are handled by compact/mapped parsers.
         if re.search(r"[A-Za-z]", price_raw):
             continue
         purchase = parse_price(price_raw)
@@ -220,13 +266,18 @@ def extract_alias_price_stream_rows(
             continue
 
         row_pairs: list[tuple[str, float]] = []
-        row_pairs.extend(_extract_adjacent_cell_pairs(row_cells))
-        row_pairs.extend(_extract_spread_row_pairs(row_cells))
         for target in row_cells:
             row_pairs.extend(_extract_row_pairs(target))
+        row_pairs.extend(_extract_adjacent_cell_pairs(row_cells))
+        row_pairs.extend(_extract_spread_row_pairs(row_cells))
 
         if not row_pairs:
             continue
+
+        best_row_purchase_by_alias: dict[str, float] = {}
+        for alias, purchase in row_pairs:
+            best_row_purchase_by_alias[alias] = purchase
+        row_pairs = list(best_row_purchase_by_alias.items())
 
         pack = ""
         if include_pack:

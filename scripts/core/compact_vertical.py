@@ -12,7 +12,7 @@ from core.normalization_helpers import is_current_like_purchase
 from core.text_utils import split_cell_lines
 
 
-ALIAS_GROUP_PATTERN = re.compile(r"\d{4,6}\s\d{2,6}")
+ALIAS_GROUP_PATTERN = re.compile(r"\b\d{4,6}[ \t]\d{2,6}\b")
 MIN_COMPACT_PURCHASE = 50.0
 
 
