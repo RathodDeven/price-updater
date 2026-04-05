@@ -205,6 +205,28 @@ def normalize_rows(
                 base_alias = row.alias[:-1]
                 if base_alias in mapped_alias_prices and row.purchase in mapped_alias_prices[base_alias]:
                     continue
+            # Stream fallback can lose suffix letters in split aliases
+            # (e.g. mapped "507886N" vs stream "507886") or drop leading
+            # digits in multiline fragments (e.g. mapped "507860" vs stream
+            # "07860"). When header-mapped rows already carry the same price,
+            # suppress these weaker stream variants.
+            if any(
+                row.purchase in prices
+                and mapped_alias != row.alias
+                and mapped_alias.startswith(row.alias)
+                and mapped_alias[len(row.alias) :].isalpha()
+                for mapped_alias, prices in mapped_alias_prices.items()
+            ):
+                continue
+            if row.alias.isdigit() and any(
+                row.purchase in prices
+                and mapped_alias.isdigit()
+                and len(mapped_alias) > len(row.alias)
+                and len(mapped_alias) - len(row.alias) <= 2
+                and mapped_alias.endswith(row.alias)
+                for mapped_alias, prices in mapped_alias_prices.items()
+            ):
+                continue
             filtered_stream_rows.append(row)
         stream_rows = filtered_stream_rows
         extras = stream_rows + compact_vertical_rows

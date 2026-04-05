@@ -125,7 +125,56 @@ def extract_alias(value: str, allow_numeric: bool = False) -> str:
     cleaned = clean_alias(base_value)
 
     if allow_numeric:
-        # Handle split numeric aliases like "0281 32" within a single line.
+        # Recover aliases split by a newline between short prefix and the
+        # remaining spaced Cat.No group (e.g. "5\n078 60" -> "507860").
+        lines = [line.strip() for line in base_value.splitlines() if line.strip()]
+        for idx in range(len(lines) - 1):
+            prefix = lines[idx]
+            next_line = lines[idx + 1]
+            if not re.fullmatch(r"\d{1,2}", prefix):
+                continue
+            split_match = re.match(
+                r"^(\d{2,6})[ \t](\d{2,6})[ \t]+([A-Za-z])\b",
+                next_line,
+            )
+            if not split_match:
+                split_match = re.match(
+                    r"^(\d{2,6})[ \t](\d{2,6})([A-Za-z]{1,6})?\b",
+                    next_line,
+                )
+            if not split_match:
+                continue
+            suffix = split_match.group(3) or ""
+            base_candidate = clean_alias(f"{split_match.group(1)}{split_match.group(2)}{suffix}")
+            # Only rejoin when the second line looks like a truncated tail
+            # (leading zero after split). This avoids prepending unrelated
+            # one-digit technical values from merged cells.
+            if not base_candidate.startswith("0"):
+                continue
+            candidate = clean_alias(f"{prefix}{base_candidate}")
+            if looks_like_alias(candidate, allow_numeric=True):
+                return candidate
+
+        # Handle split numeric aliases with one-letter spaced suffixes like
+        # "5078 86 N".
+        for match in re.finditer(
+            r"\b(\d{3,6})[ \t](\d{2,6})[ \t]+([A-Za-z])\b",
+            base_value,
+        ):
+            numeric_candidate = clean_alias(f"{match.group(1)}{match.group(2)}{match.group(3)}")
+            if looks_like_alias(numeric_candidate, allow_numeric=True):
+                return numeric_candidate
+
+        # Handle attached suffix variants such as "5757 12PL".
+        for match in re.finditer(
+            r"\b(\d{3,6})[ \t](\d{2,6})([A-Za-z]{1,6})\b",
+            base_value,
+        ):
+            numeric_candidate = clean_alias(f"{match.group(1)}{match.group(2)}{match.group(3)}")
+            if looks_like_alias(numeric_candidate, allow_numeric=True):
+                return numeric_candidate
+
+        # Handle plain split numeric aliases like "0281 32".
         # Use [ \t] instead of \s to avoid matching across newlines, which
         # would merge unrelated numbers from adjacent lines (e.g. 7000\n4240).
         for numeric_group in re.findall(r"\b\d{3,6}[ \t]\d{2,6}\b", base_value):

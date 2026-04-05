@@ -175,6 +175,13 @@ The extractor currently handles these generic table patterns:
 39. Spaced-numeric alias-group detection now requires whole-token boundaries, so alphanumeric Cat.Nos like `5757 12PL` keep their suffix (`575712PL`) instead of being truncated to numeric-only aliases (`575712`)
 40. Mapped purchase cells that inline MRP and pack in one value (for example `2220 1/10/100`) now parse the leading numeric token as MRP and treat the trailing slash token as pack, so those rows are not dropped
 41. When mapped MRP is blank but description text ends with inline `MRP pack` (for example `... 1736 1/20/200`), extraction now prefers the inline MRP (`1736`) and avoids trailing pack suffix leakage (`200`) into purchase
+42. Dual-role merged Cat.No+MRP columns with numeric-only stacks (for example `77030\n423670`) now infer stable stack orientation from row consistency, preventing reversed synthetic rows like `77030 -> 423670`
+43. Nearby-column MRP fallback now stays on the same side of the alias as the mapped purchase column, preventing cross-table MRP leakage between side-by-side blocks (for example right block alias receiving left block MRP)
+44. Dual-role stack orientation inference now applies only to compact two-line numeric stacks without in-cell pack tokens; mixed stacks such as `63\n4\n10794\n1/5/60` avoid nominal/current leakage into purchase
+45. Dual-role continuation salvage now scans a short same-column window around alias rows (beyond immediate ±1) while respecting strong split-alias boundaries, recovering split pairs like alias row separated from its MRP by intervening description lines
+46. Strong alias expansion now requires digit-dense code shapes (>=3 digits), preventing descriptive blends like `IP43MIVAN` from being emitted as aliases
+47. Spaced Cat.Nos with suffix letters preserve the suffix even when OCR inserts a gap before it (for example `5078 86 N` -> `507886N`), and mapped continuation rows use that full alias for pairing
+48. Multiline split numeric aliases are rejoined (for example `5` + `078 60` -> `507860`), and shorter suffix fragments (for example `07860`) are suppressed when the full mapped alias exists
 
 This also covers mixed rows where several Cat.Nos are listed first but only the last one or two have visible MRP values (for example some variants are price-on-request while later variants have explicit MRP).
 

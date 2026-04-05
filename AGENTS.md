@@ -53,6 +53,8 @@ Repository agent rules for `price-updater`.
 - When Camelot merges multiple PDF columns into one cell (dual-role columns), the merged column may contain both alias and purchase evidence (e.g. "Cat.Nos Pack MRP*/₹/Unit"). If no non-alias purchase candidate has purchase header evidence, allow dual-role alias columns with purchase evidence to serve as the purchase source for other alias columns.
 - Merged spread headers like `Cat.Nos Description` should still count as alias headers when explicit alias-marker evidence exists, even if particulars scores equally.
 - If one header cell carries both alias and purchase evidence, allow a dual-role `alias == purchase` mapping and parse same-cell alphanumeric alias+MRP stacks generically.
+- In dual-role numeric-only stacked cells under merged Cat.No+MRP headers (for example `77030\n423670` with pack in adjacent column), infer stack order from row-pattern consistency and keep alias/purchase orientation stable; do not emit reversed synthetic pairs (`77030 -> 423670`).
+- Dual-role numeric stack inference should only apply to compact two-line stacks without in-cell pack tokens; mixed stacks like `63\n4\n10794\n1/5/60` must not infer `10794 -> 63` and should recover MRP from non-current numeric lines/continuation context.
 - Do not reject mapped alias cells just because the description text contains current markers like `10A` or `16A` when the cell starts with a strong catalog alias.
 - Header detection (`detect_header_row_index`) uses `lookahead_rows=0` so that a row ABOVE the actual header cannot steal role evidence from rows below it via lookahead. The actual enrichment after detection still uses `lookback_rows=4` and `lookahead_rows=2`.
 - Stacked purchase cells (e.g. "15670\n1\n-\n-\n-" where MRP is first, followed by pack and 4P data) must be parsed by splitting on `\n` and taking the first valid price ≥ 50. `parse_price()` alone rejects these as multi-chunk. Fix is in `_extract_with_mappings` in `normalization.py`.
@@ -72,14 +74,20 @@ Repository agent rules for `price-updater`.
 - In mapped purchase cells that inline MRP and pack in one token stream (for example `2220 1/10/100`), parse the leading numeric token as MRP and treat the trailing slash token as pack, instead of dropping the row.
 - When mapped purchase is blank but particulars/intermediate text ends with inline `MRP pack` (for example `... 1736 1/20/200`), prefer the inline MRP (`1736`) before trailing-number fallback so pack suffix (`200`) is not misclassified as purchase.
 - Nearby-column MRP recovery (when mapped purchase cell is blank) must only consider purchase-header-evidenced columns near alias, and should ignore candidates that are only current-like values.
+- Nearby-column MRP recovery must stay on the same side of the alias as the mapped purchase column (right-side alias blocks must not borrow MRP from left-side parallel tables, and vice versa).
 - In mapped continuation rows where the Cat.No sits at the start of particulars/description text (for example `AC21104MW ...`) and the mapped alias column is blank or stale, salvage that leading alias generically instead of dropping the row.
 - Previous-row purchase salvage must prefer the mapped purchase column over alias-column numerics, and alias-column salvage should ignore text-bearing cells; otherwise continuation text like `... 625018` or nominal ratings like `60` can be misread as MRP.
 - Continuation-row purchase salvage may use the adjacent mapped purchase value even when the continuation row still has description text in the alias column or pack in the pack column, as long as that continuation row has no strong alias of its own.
+- In dual-role (`alias==purchase`) continuation layouts, purchase salvage should scan a short local window (not just immediate ±1 row) in the same mapped column and stop at strong split-alias boundaries, so split pairs like alias-on-row-N and MRP-on-row-(N-2) are recovered without crossing into other items.
 - If a mapped purchase cell is blank while a separate pack column is populated, do not infer MRP from trailing description numerics by default; values like `Pack consisting of 100` are pack/quantity text, not price.
 - When emitting multiple aliases from one mapped multiline alias cell, only emit extra line-level aliases that are strong catalog-code candidates; configuration text like `2 NO`, `2 NC`, `4 NO`, `1 NC` must not become aliases.
 - Stream fallback must handle shifted adjacent-cell pairs where an alias appears at the tail of one cell and the MRP appears at the head of the next cell (for example `... 0261 23` then `86160`) so right-block aliases are not dropped or mispaired to previous MRPs.
 - Stream alias-group normalization must apply numeric footnote cleanup for spaced Cat.Nos groups (for example `4122 831` -> `412283`) to prevent flattened superscript markers from producing synthetic aliases like `4122831`.
 - Strong alias salvage must reject descriptive word-number tokens (for example `SOCKET-3`, `WAY-1`, `MODULE-2`) so continuation description fragments with adjacent MRPs cannot be promoted to aliases.
+- Strong alias candidates must be digit-dense (>=3 digits) so mixed description blends like `IP43MIVAN` are not emitted as aliases.
+- Spaced numeric aliases with suffix letters must preserve the suffix even when OCR inserts a space before it (for example `5078 86 N` -> `507886N`).
+- Split multiline numeric aliases with short prefix lines must be rejoined before validation (for example `5` + `078 60` -> `507860`), and shorter trailing fragments (`07860`) must not be emitted as extra aliases.
+- When mapped alias is overridden from particulars (because alias column is blank/stale), suppress extra alias-line expansion from the stale alias cell to avoid emitting conflicting alias+price pairs.
 
 ## Change Discipline
 - Make smallest viable changes.

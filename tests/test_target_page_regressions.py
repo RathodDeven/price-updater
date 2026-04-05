@@ -336,6 +336,8 @@ def test_main_price_list_page_123_strips_flattened_footnote_alias(tmp_path: Path
 
     assert row_dict.get("412283") == 83500.0
     assert "4122831" not in row_dict
+    # Split continuation in right block: alias row can be separated from MRP.
+    assert row_dict.get("412310") == 1636.0
 
 
 def test_main_price_list_page_166_rejects_descriptive_socket_alias(tmp_path: Path) -> None:
@@ -347,6 +349,19 @@ def test_main_price_list_page_166_rejects_descriptive_socket_alias(tmp_path: Pat
     assert row_dict.get("AC1136MW") == 638.0
     assert row_dict.get("AA27108MT") == 4532.0
     assert "SOCKET-3" not in row_dict
+
+
+def test_main_price_list_page_116_dual_role_split_rows_use_mrp_not_nominal(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p116.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 116, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("411891") == 10200.0
+    assert row_dict.get("411892") == 10331.0
+    assert row_dict.get("411893") == 10794.0
+    assert "10794" not in row_dict
+    assert ("411893", 63.0) not in rows
 
 
 def test_main_price_list_page_219_recovers_compact_two_row_table(tmp_path: Path) -> None:
@@ -412,6 +427,29 @@ def test_main_price_list_page_235_keeps_shifted_audio_video_rows(tmp_path: Path)
     assert row_dict.get("679289") == 3180.0
 
 
+def test_main_price_list_page_43_dual_role_numeric_column_keeps_alias_purchase_orientation(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p43.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 43, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+
+    assert ("423670", 77030.0) in row_set
+    assert ("423672", 77030.0) in row_set
+    assert ("423674", 77030.0) in row_set
+    assert ("423676", 77030.0) in row_set
+    assert ("423679", 85030.0) in row_set
+    assert ("423728", 85460.0) in row_set
+    assert ("423116", 104360.0) in row_set
+    assert ("423117", 110880.0) in row_set
+
+    # Reversed synthetic rows from dual-role fallback must not be emitted.
+    assert ("77030", 423670.0) not in row_set
+    assert ("85030", 423679.0) not in row_set
+    assert ("85460", 423728.0) not in row_set
+    assert ("104360", 423116.0) not in row_set
+    assert ("110880", 423117.0) not in row_set
+
+
 def test_main_price_list_page_44_skips_price_on_request_mccb_grid(tmp_path: Path) -> None:
     out_xlsx = tmp_path / "main_price_list_2026_p44.xlsx"
     _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 44, out_xlsx)
@@ -465,6 +503,39 @@ def test_main_price_list_page_114_uses_mrp_not_nominal_rating(tmp_path: Path) ->
 
     assert row_dict.get("408848") == 1267.0
     assert ("408848", 60.0) not in rows
+    # Nearby-column salvage must not pull MRP from adjacent left table block.
+    assert row_dict.get("408832") == 1122.0
+    assert ("408832", 9393.0) not in rows
+
+
+def test_main_price_list_page_134_rejects_ip_description_alias_garbage(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p134.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 134, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("507673M") == 17568.0
+    assert "IP43MIVAN" not in row_dict
+
+
+def test_main_price_list_page_136_preserves_n_suffix_aliases_and_pairs(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p136.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 136, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("507885N") == 14681.0
+    assert row_dict.get("507886N") == 16447.0
+    assert row_dict.get("507887N") == 18423.0
+    assert row_dict.get("507888N") == 22936.0
+    assert row_dict.get("507898N") == 30418.0
+    assert row_dict.get("507860") == 4525.0
+
+    assert "507886" not in row_dict
+    assert "507887" not in row_dict
+    assert "507888" not in row_dict
+    assert "07860" not in row_dict
+    assert ("507886N", 22936.0) not in rows
 
 
 def test_main_price_list_page_138_skips_blank_mrp_rows(tmp_path: Path) -> None:

@@ -202,6 +202,15 @@ def leading_alias_from_text(text: str, allow_numeric: bool = False) -> str | Non
         if not stripped:
             continue
 
+        spaced_suffix_match = re.match(r"^(\d{3,6}[ \t]\d{2,6})[ \t]+([A-Za-z])\b", stripped)
+        if spaced_suffix_match and allow_numeric:
+            candidate = extract_alias(
+                f"{spaced_suffix_match.group(1)}{spaced_suffix_match.group(2)}",
+                allow_numeric=True,
+            )
+            if looks_like_alias(candidate, allow_numeric=True):
+                return candidate
+
         alnum_split_match = re.match(r"^(\d{3,6}[ \t]\d{2,6}[A-Za-z]{1,6})\b", stripped)
         if alnum_split_match and allow_numeric:
             candidate = extract_alias(alnum_split_match.group(1), allow_numeric=True)
@@ -240,5 +249,7 @@ def is_strong_alias_candidate(alias: str, allow_numeric: bool = False) -> bool:
     if re.fullmatch(r"\d+(?:\.\d+)?[A-Za-z]{1,3}(?:[/-]\d+(?:\.\d+)?[A-Za-z]{1,3})+", alias, flags=re.IGNORECASE):
         return False
 
+    # Strong alias overrides should be digit-dense enough to avoid promoting
+    # descriptive blends like "IP43MIVAN" into synthetic aliases.
     digit_count = sum(ch.isdigit() for ch in alias)
-    return digit_count >= 3 or len(alias) >= 6
+    return digit_count >= 3
