@@ -7,6 +7,7 @@ import re
 from core.models import (
     ALIAS_PATTERN,
     NON_ALIAS_UNIT_PATTERN,
+    NON_ALIAS_RANGE_PATTERN,
     PACK_LINE_HINT,
     PACK_PATTERN,
     PRICE_PATTERN,
@@ -231,6 +232,9 @@ def looks_like_alias(value: str, allow_numeric: bool = False) -> bool:
         return False
     # Reject IP protection ratings (IP20, IP54, etc.)
     if NON_ALIAS_IP_RATING_PATTERN.match(value):
+        return False
+    # Reject numeric ranges (e.g., "1 to 1.6", "2.5-4") that are electrical ratings
+    if NON_ALIAS_RANGE_PATTERN.match(value):
         return False
     if allow_numeric and NUMERIC_ALIAS_PATTERN.match(value):
         return True

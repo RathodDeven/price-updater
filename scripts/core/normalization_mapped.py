@@ -160,6 +160,137 @@ def _dual_role_numeric_stack_pair(
     return alias, round(purchase, 2)
 
 
+def _is_split_row_price_candidate(
+    row: list[str],
+    mapping: dict[str, int],
+    allow_numeric_alias: bool,
+) -> bool:
+    alias_raw = row[mapping["alias"]].strip() if mapping["alias"] < len(row) else ""
+    price_raw = row[mapping["purchase"]].strip() if mapping["purchase"] < len(row) else ""
+    purchase = parse_price(price_raw)
+    if purchase is None or purchase < 50 or is_current_like_purchase(purchase):
+        return False
+    if _strong_inline_alias(alias_raw, allow_numeric_alias) is not None:
+        return False
+    if _looks_like_technical_matrix_continuation(alias_raw):
+        return False
+    if re.search(r"[A-Za-z]", alias_raw):
+        return False
+    return True
+
+
+def _infer_split_row_purchase_direction(
+    data_rows: list[list[str]],
+    mapping: dict[str, int],
+    allow_numeric_alias: bool,
+) -> str | None:
+    """Infer whether split-row MRPs usually sit above or below alias rows."""
+    if mapping.get("alias") == mapping.get("purchase"):
+        return None
+
+    prev_score = 0
+    next_score = 0
+
+    for row_idx, row in enumerate(data_rows):
+        alias_raw = row[mapping["alias"]].strip() if mapping["alias"] < len(row) else ""
+        price_raw = row[mapping["purchase"]].strip() if mapping["purchase"] < len(row) else ""
+        if not alias_raw or parse_price(price_raw) is not None:
+            continue
+
+        alias = _strong_inline_alias(alias_raw, allow_numeric_alias)
+        if alias is None:
+            continue
+
+        prev_candidate = row_idx > 0 and _is_split_row_price_candidate(
+            data_rows[row_idx - 1],
+            mapping,
+            allow_numeric_alias,
+        )
+        next_candidate = row_idx + 1 < len(data_rows) and _is_split_row_price_candidate(
+            data_rows[row_idx + 1],
+            mapping,
+            allow_numeric_alias,
+        )
+
+        if prev_candidate and not next_candidate:
+            prev_score += 2
+        elif next_candidate and not prev_candidate:
+            next_score += 2
+        elif prev_candidate and next_candidate:
+            if row_idx > 1 and _is_split_row_price_candidate(data_rows[row_idx - 2], mapping, allow_numeric_alias):
+                prev_score += 1
+            if row_idx + 2 < len(data_rows) and _is_split_row_price_candidate(
+                data_rows[row_idx + 2],
+                mapping,
+                allow_numeric_alias,
+            ):
+                next_score += 1
+
+    if prev_score >= 2 and prev_score > next_score:
+        return "previous"
+    if next_score >= 2 and next_score > prev_score:
+        return "next"
+    return None
+
+
+def _has_alias_line_evidence(text: str) -> bool:
+    if not text:
+        return False
+    lines = split_cell_lines(text)
+    return any(looks_like_alias_line(line) for line in lines) or bool(
+        SPACED_ALIAS_EVIDENCE_PATTERN.search(text)
+    )
+
+
+def _scan_neighbor_purchase(
+    data_rows: list[list[str]],
+    row_idx: int,
+    mapping: dict[str, int],
+    allow_numeric_alias: bool,
+    preferred_direction: str | None,
+) -> tuple[float, str] | None:
+    """Find purchase from nearby rows while respecting local split-row structure."""
+    direction_order = [-1, 1] if preferred_direction == "previous" else [1, -1]
+    max_hops = 3
+
+    for step in direction_order:
+        for hop in range(1, max_hops + 1):
+            neighbor_idx = row_idx + (step * hop)
+            if neighbor_idx < 0 or neighbor_idx >= len(data_rows):
+                break
+
+            neighbor_row = data_rows[neighbor_idx]
+            neighbor_alias_raw = (
+                neighbor_row[mapping["alias"]].strip()
+                if mapping["alias"] < len(neighbor_row)
+                else ""
+            )
+            neighbor_price_raw = (
+                neighbor_row[mapping["purchase"]].strip()
+                if mapping["purchase"] < len(neighbor_row)
+                else ""
+            )
+
+            if _strong_inline_alias(neighbor_alias_raw, allow_numeric_alias) is not None:
+                break
+            if _has_alias_line_evidence(neighbor_alias_raw):
+                break
+            if _looks_like_technical_matrix_continuation(neighbor_alias_raw):
+                continue
+
+            candidate = parse_price(neighbor_price_raw)
+            if candidate is None or candidate < 50 or is_current_like_purchase(candidate):
+                continue
+
+            neighbor_pack = ""
+            if "pack" in mapping and mapping["pack"] < len(neighbor_row):
+                neighbor_pack = clean_pack(neighbor_row[mapping["pack"]])
+
+            return round(candidate, 2), neighbor_pack
+
+    return None
+
+
 def extract_with_mappings(
     data_rows: list[list[str]],
     mappings: list[dict[str, int]],
@@ -173,11 +304,29 @@ def extract_with_mappings(
     normalized: list[NormalizedRow] = []
     purchase_usage_count: dict[int, int] = {}
     dual_role_order_hint: dict[int, str | None] = {}
+    allow_numeric_alias_by_mapping: dict[int, bool] = {}
+    purchase_header_evidence_by_mapping: dict[int, bool] = {}
+    split_row_purchase_direction: dict[int, str | None] = {}
     for mapping in mappings:
         p_idx = mapping["purchase"]
         purchase_usage_count[p_idx] = purchase_usage_count.get(p_idx, 0) + 1
     for idx, mapping in enumerate(mappings):
+        allow_numeric_alias_by_mapping[idx] = force_numeric_alias or (
+            scored_headers is not None
+            and mapping["alias"] < len(scored_headers)
+            and has_alias_header_evidence(scored_headers[mapping["alias"]])
+        )
+        purchase_header_evidence_by_mapping[idx] = (
+            scored_headers is not None
+            and mapping["purchase"] < len(scored_headers)
+            and has_purchase_header_evidence(scored_headers[mapping["purchase"]])
+        )
         dual_role_order_hint[idx] = _infer_dual_role_numeric_order(data_rows, mapping)
+        split_row_purchase_direction[idx] = _infer_split_row_purchase_direction(
+            data_rows,
+            mapping,
+            allow_numeric_alias_by_mapping[idx],
+        )
 
     for row_idx, row in enumerate(data_rows):
         if not any(cell.strip() for cell in row):
@@ -189,17 +338,9 @@ def extract_with_mappings(
             if "particulars" in mapping and mapping["particulars"] < len(row):
                 particulars_raw = row[mapping["particulars"]].strip()
 
-            allow_numeric_alias = force_numeric_alias or (
-                scored_headers is not None
-                and mapping["alias"] < len(scored_headers)
-                and has_alias_header_evidence(scored_headers[mapping["alias"]])
-            )
+            allow_numeric_alias = allow_numeric_alias_by_mapping[mapping_idx]
 
-            purchase_header_evidence_for_mapping = (
-                scored_headers is not None
-                and mapping["purchase"] < len(scored_headers)
-                and has_purchase_header_evidence(scored_headers[mapping["purchase"]])
-            )
+            purchase_header_evidence_for_mapping = purchase_header_evidence_by_mapping[mapping_idx]
 
             between_raw = ""
             left_col = min(mapping["alias"], mapping["purchase"])
@@ -382,9 +523,9 @@ def extract_with_mappings(
                                 return candidate
                         return None
 
-                    neighbor_purchase = _scan_direction(-1)
+                    neighbor_purchase = _scan_direction(1)
                     if neighbor_purchase is None:
-                        neighbor_purchase = _scan_direction(1)
+                        neighbor_purchase = _scan_direction(-1)
 
                     if neighbor_purchase is not None:
                         pack = ""
@@ -513,7 +654,13 @@ def extract_with_mappings(
             if not has_alias_line_evidence:
                 weak_alias = extract_alias(alias_raw, allow_numeric=True)
                 has_particulars_salvage = purchase is not None and particulars_alias is not None
-                if mixed_pair is None and not has_particulars_salvage and leading_inline_alias is None:
+                has_particulars_alias_candidate = particulars_alias is not None
+                if (
+                    mixed_pair is None
+                    and not has_particulars_salvage
+                    and not has_particulars_alias_candidate
+                    and leading_inline_alias is None
+                ):
                     # Guard against section headings in mapped alias columns
                     # (for example "Double pole 240V") being promoted into
                     # synthetic aliases when purchase is salvaged nearby.
@@ -597,38 +744,31 @@ def extract_with_mappings(
                 else False
             )
 
-            if purchase is None and alias_is_strong and (alias_raw or particulars_alias) and row_idx + 1 < len(data_rows):
-                next_row = data_rows[row_idx + 1]
-                next_alias_raw = next_row[mapping["alias"]].strip() if mapping["alias"] < len(next_row) else ""
-                next_price_raw = next_row[mapping["purchase"]].strip() if mapping["purchase"] < len(next_row) else ""
-                next_purchase = parse_price(next_price_raw)
-                next_pack_raw = ""
-                if "pack" in mapping and mapping["pack"] < len(next_row):
-                    next_pack_raw = next_row[mapping["pack"]].strip()
-                next_has_strong_alias = _strong_inline_alias(next_alias_raw, allow_numeric_alias) is not None
-                next_is_technical = _looks_like_technical_matrix_continuation(next_alias_raw)
-                if (
-                    next_purchase is not None
-                    and not next_has_strong_alias
-                    and not next_is_technical
-                    and not is_current_like_purchase(next_purchase)
-                ):
-                    purchase = next_purchase
-                    if not shifted_pack_override and clean_pack(next_pack_raw):
-                        shifted_pack_override = clean_pack(next_pack_raw)
+            # Locality-aware purchase salvage for split-row layouts:
+            # use inferred block orientation first and stop at alias boundaries.
+            if purchase is None and alias_is_strong and (alias_raw or particulars_alias):
+                neighbor_salvage = _scan_neighbor_purchase(
+                    data_rows,
+                    row_idx,
+                    mapping,
+                    allow_numeric_alias,
+                    split_row_purchase_direction.get(mapping_idx),
+                )
+                if neighbor_salvage is not None:
+                    purchase, neighbor_pack = neighbor_salvage
+                    if not shifted_pack_override and neighbor_pack:
+                        shifted_pack_override = neighbor_pack
 
-            # Variant of split-row layouts: alias appears on current row while
-            # MRP is stacked in the previous row in the same alias column.
+            # Secondary fallback for the variant where the previous alias cell
+            # itself is a numeric stack and can hold MRP lines.
             if purchase is None and alias_is_strong and alias and row_idx > 0:
                 prev_row = data_rows[row_idx - 1]
                 prev_alias_raw = prev_row[mapping["alias"]].strip() if mapping["alias"] < len(prev_row) else ""
                 if prev_alias_raw:
                     prev_lines = split_cell_lines(prev_alias_raw)
-                    prev_has_alias = any(looks_like_alias_line(line) for line in prev_lines) or bool(
-                        SPACED_ALIAS_EVIDENCE_PATTERN.search(prev_alias_raw)
-                    )
+                    prev_has_alias = _has_alias_line_evidence(prev_alias_raw)
                     prev_has_text = bool(re.search(r"[A-Za-z]", prev_alias_raw))
-                    if purchase is None and not prev_has_alias and not prev_has_text:
+                    if not prev_has_alias and not prev_has_text:
                         prev_candidates: list[float] = []
                         for line in prev_lines:
                             parsed_prev = parse_price(line.strip())
@@ -638,22 +778,6 @@ def extract_with_mappings(
                             prev_non_current = [v for v in prev_candidates if not is_current_like_purchase(v)]
                             if prev_non_current:
                                 purchase = max(prev_non_current)
-                    if purchase is None and not prev_has_alias:
-                        prev_price_raw = (
-                            prev_row[mapping["purchase"]].strip() if mapping["purchase"] < len(prev_row) else ""
-                        )
-                        prev_price = parse_price(prev_price_raw)
-                        if (
-                            prev_price is not None
-                            and prev_price >= 50
-                            and not _looks_like_technical_matrix_continuation(prev_alias_raw)
-                        ):
-                            purchase = prev_price
-                if purchase is None and not prev_alias_raw:
-                    prev_price_raw = prev_row[mapping["purchase"]].strip() if mapping["purchase"] < len(prev_row) else ""
-                    prev_price = parse_price(prev_price_raw)
-                    if prev_price is not None and prev_price >= 50 and not is_current_like_purchase(prev_price):
-                        purchase = prev_price
 
             if purchase is None and (alias or particulars_alias) and (particulars_raw or between_raw):
                 for candidate_text in (particulars_raw, between_raw):

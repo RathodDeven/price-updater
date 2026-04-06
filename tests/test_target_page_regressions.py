@@ -495,11 +495,31 @@ def test_main_price_list_page_95_skips_contact_configuration_alias_garbage(tmp_p
         assert bad_alias not in aliases
 
 
+def test_main_price_list_page_103_skips_rated_current_ranges_as_aliases(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p103.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 103, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = dict(rows)
+    aliases = {alias for alias, _ in rows}
+
+    assert row_dict.get("417326") == 6950.0
+    assert row_dict.get("417327") == 7160.0
+    assert row_dict.get("417330") == 7840.0
+
+    for bad_alias in {"1TO1.6", "2.5TO4", "6TO10", "9TO13", "11TO17", "14TO22"}:
+        assert bad_alias not in aliases
+
+
 def test_main_price_list_page_114_uses_mrp_not_nominal_rating(tmp_path: Path) -> None:
     out_xlsx = tmp_path / "main_price_list_2026_p114.xlsx"
     _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 114, out_xlsx)
     rows = _read_alias_purchase(out_xlsx)
     row_dict = dict(rows)
+
+    assert row_dict.get("408662") == 14163.0
+    assert ("408662", 15086.0) not in rows
+    assert row_dict.get("408663") == 15086.0
+    assert row_dict.get("408664") == 16581.0
 
     assert row_dict.get("408848") == 1267.0
     assert ("408848", 60.0) not in rows
@@ -528,6 +548,9 @@ def test_main_price_list_page_136_preserves_n_suffix_aliases_and_pairs(tmp_path:
     assert row_dict.get("507886N") == 16447.0
     assert row_dict.get("507887N") == 18423.0
     assert row_dict.get("507888N") == 22936.0
+    assert row_dict.get("507895N") == 20380.0
+    assert row_dict.get("507896N") == 23313.0
+    assert row_dict.get("507897N") == 26942.0
     assert row_dict.get("507898N") == 30418.0
     assert row_dict.get("507860") == 4525.0
 
@@ -835,3 +858,27 @@ def test_sample_4_page_256_recovers_mrp_for_011110_in_split_rows(tmp_path: Path)
     assert ("638001", 75.0) not in row_set
     assert ("638038", 1270.0) in row_set
     assert ("638008", 240.0) in row_set
+
+
+def test_main_price_list_page_166_extracts_split_description_aliases(tmp_path: Path) -> None:
+    """Aliases whose Cat.No appears on a standalone row before description+MRP must be extracted.
+
+    AA3406MT has its Cat.No in row N and 'USB Charger - Power \\n13318' in row N+1.
+    Previously leading_alias_from_text incorrectly identified '13318' (the MRP on
+    a trailing line after description prose) as the alias of row N+1, causing
+    _scan_direction to break early and AA3406MT to be dropped without a purchase.
+    """
+    out_xlsx = tmp_path / "main_price_list_2026_p166.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 166, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    # AA3406MT: Cat.No alone on one row, description + MRP on the next
+    assert row_dict.get("AA3406MT") == 13318.0, f"AA3406MT missing or wrong: {row_dict.get('AA3406MT')}"
+    # AA3401MT: Cat.No + description + MRP all in one stacked cell (already worked)
+    assert row_dict.get("AA3401MT") == 17184.0
+    # Hospitality section
+    assert row_dict.get("AA27107MT") == 3278.0
+    assert row_dict.get("AA27108MT") == 4532.0
+    # Garbage row guard: MRP value must not appear as its own alias
+    assert "13318" not in row_dict, "MRP 13318 must not be emitted as an alias"

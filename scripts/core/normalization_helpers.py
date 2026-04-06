@@ -229,6 +229,12 @@ def leading_alias_from_text(text: str, allow_numeric: bool = False) -> str | Non
         candidate = extract_alias(token_match.group(1), allow_numeric=allow_numeric)
         if looks_like_alias(candidate, allow_numeric=allow_numeric):
             return candidate
+        # If the first-token extract failed and the line starts with
+        # alphabetic description prose (e.g. "USB Charger - Power"),
+        # stop scanning — subsequent lines in such cells contain
+        # description continuation or embedded MRP values, not aliases.
+        if re.match(r"^[A-Za-z]{2,}\s", stripped):
+            return None
     return None
 
 

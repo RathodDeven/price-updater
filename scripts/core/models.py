@@ -42,3 +42,6 @@ ALIAS_PATTERN = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9][A-Za-z0-9\-_/\.]
 PACK_PATTERN = re.compile(r"^[A-Za-z0-9\-_/\.xX]+$")
 PACK_LINE_HINT = re.compile(r"^(?:\d+\s*/\s*\d+|\d+(?:\.\d+)?\s*(?:nos?|pcs?|pc|set|box|pkt|unit|uom))$", re.IGNORECASE)
 NON_ALIAS_UNIT_PATTERN = re.compile(r"^\d+(?:\.\d+)?(?:MA|A|P|V|KV|W|KW|MW|HZ|KA)$", re.IGNORECASE)
+# Regex pattern for numeric ranges: "1 to 1.6", "2.5 to 4", "1-1.6", "2.5-4", etc.
+# These are electrical/technical ratings, not product codes.
+NON_ALIAS_RANGE_PATTERN = re.compile(r"^\d+(?:\.\d+)?(?:\s+)?(?:to|[-–—]|//)(?:\s+)?\d+(?:\.\d+)?$", re.IGNORECASE)
