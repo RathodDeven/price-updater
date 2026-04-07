@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from core.parsing import extract_alias
+from core.parsing import extract_alias, looks_like_alias
 from core.normalization_helpers import is_strong_alias_candidate
 
 
@@ -44,3 +44,21 @@ def test_is_strong_alias_candidate_rejects_descriptive_word_number_tokens() -> N
     assert is_strong_alias_candidate("SOCKET-3", allow_numeric=True) is False
     assert is_strong_alias_candidate("WAY-1", allow_numeric=True) is False
     assert is_strong_alias_candidate("MODULE-2", allow_numeric=True) is False
+
+
+def test_looks_like_alias_rejects_collapsed_voltage_headings() -> None:
+    assert looks_like_alias("DOUBLEPOLE415V") is False
+    assert looks_like_alias("FOURPOLE415V") is False
+    assert looks_like_alias("5ST38140RC") is True
+
+
+def test_looks_like_alias_rejects_rated_power_descriptors() -> None:
+    assert looks_like_alias("5-300W/75W") is False
+    assert looks_like_alias("60TO400W") is False
+    assert looks_like_alias("AC24107MB") is True
+
+
+def test_looks_like_alias_rejects_prefixed_dimension_descriptors() -> None:
+    assert looks_like_alias("JB150X150X65-90") is False
+    assert looks_like_alias("JBFLY225X225X65-90") is False
+    assert looks_like_alias("AC24103MB") is True

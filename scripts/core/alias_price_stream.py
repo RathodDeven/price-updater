@@ -16,6 +16,7 @@ MIN_PURCHASE = 50.0
 MAX_PURCHASE = 500000.0
 # Price-on-request markers used in catalogs (■, •, etc.)
 PRICE_ON_REQUEST_CHARS = re.compile(r"[\uf06e\uf0b7\u25a0\u25cf\u2022]")
+UNAVAILABLE_PRICE_MARKER_PATTERN = re.compile(r"^(?:n/?a|na|n|nil|--|-|—|–|\.)$", re.IGNORECASE)
 
 
 def _normalize_alias(alias_group: str) -> str:
@@ -232,6 +233,18 @@ def _extract_spread_row_pairs(row_cells: list[str]) -> list[tuple[str, float]]:
         seen_text_between = False
         chosen_price: float | None = None
         for cell in row_cells[idx + 1 :]:
+            compact_cell = " ".join(cell.split()).strip()
+            if not compact_cell:
+                continue
+            # If a no-price marker appears before a numeric token, treat the
+            # item's MRP as unavailable and do not consume trailing pack values.
+            if PRICE_ON_REQUEST_CHARS.search(compact_cell) or UNAVAILABLE_PRICE_MARKER_PATTERN.fullmatch(compact_cell):
+                break
+            if ALIAS_GROUP_PATTERN.search(cell):
+                # A later alias cell starts a new item block on this row.
+                # Do not let an earlier stale/gutter alias claim the new
+                # item's price from further right columns.
+                break
             if re.search(r"[A-Za-z]", cell):
                 seen_text_between = True
                 continue

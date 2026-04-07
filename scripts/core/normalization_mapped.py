@@ -302,6 +302,11 @@ def extract_with_mappings(
 ) -> list[NormalizedRow]:
     """Extract normalized rows using explicit header-derived column mappings."""
     normalized: list[NormalizedRow] = []
+    # Aliases for which the mapped purchase column contained an explicit
+    # price-on-request marker (e.g. 'n', '■').  Continuation rows that share
+    # the same alias but have an *empty* purchase cell must not fall back to
+    # mining trailing numbers from description text (e.g. RAL color codes).
+    por_aliases: set[str] = set()
     purchase_usage_count: dict[int, int] = {}
     dual_role_order_hint: dict[int, str | None] = {}
     allow_numeric_alias_by_mapping: dict[int, bool] = {}
@@ -358,7 +363,20 @@ def extract_with_mappings(
                 mapped_pack_raw = row[mapping["pack"]].strip()
             shifted_pack_override = ""
 
-            if price_raw and PRICE_ON_REQUEST_PATTERN.search(price_raw):
+            # Standalone lowercase 'n' is the price-on-request marker used by
+            # some catalog PDFs (footnote: "n Price available on request.").
+            # Treat it the same way as the special-character POR markers above.
+            _is_por = price_raw and (
+                PRICE_ON_REQUEST_PATTERN.search(price_raw)
+                or price_raw.strip().lower() == "n"
+            )
+            if _is_por:
+                # Record the alias so continuation rows for the same product
+                # (which may have an empty MRP cell) are also suppressed.
+                if alias_raw:
+                    _por_candidate = extract_alias(alias_raw, allow_numeric=True)
+                    if _por_candidate:
+                        por_aliases.add(_por_candidate)
                 continue
 
             # If a mapped purchase cell contains alphabetic description text
@@ -556,6 +574,16 @@ def extract_with_mappings(
                     if not mapped_pack_raw and inline_cell_pack:
                         shifted_pack_override = inline_cell_pack
 
+            # Some shifted rows place "MRP pack" in the mapped pack column
+            # while the mapped purchase column is blank. Recover MRP from
+            # that inline token stream instead of dropping the row.
+            if purchase is None and not price_raw and mapped_pack_raw:
+                inline_pack_purchase, inline_pack_value = extract_inline_price_and_pack(mapped_pack_raw)
+                if inline_pack_purchase is not None:
+                    purchase = inline_pack_purchase
+                    if inline_pack_value:
+                        shifted_pack_override = inline_pack_value
+
             if (purchase is None and not price_raw) or (
                 purchase is not None and not purchase_header_evidence_for_mapping
             ):
@@ -647,6 +675,10 @@ def extract_with_mappings(
             has_alias_line_evidence = looks_like_alias_line(alias_raw) or bool(
                 SPACED_ALIAS_EVIDENCE_PATTERN.search(alias_raw)
             )
+            if not has_alias_line_evidence and alias_raw:
+                numeric_alias_line = extract_alias(alias_raw, allow_numeric=True)
+                if looks_like_alias(numeric_alias_line, allow_numeric=True):
+                    has_alias_line_evidence = True
             leading_inline_alias = _strong_inline_alias(alias_raw, allow_numeric_alias) if alias_raw else None
             if not has_alias_line_evidence:
                 alias_lines = split_cell_lines(alias_raw)
@@ -795,10 +827,18 @@ def extract_with_mappings(
             can_salvage_trailing_text_price = not (
                 purchase_header_evidence_for_mapping and not price_raw and bool(mapped_pack_raw) and pack_context_in_text
             )
+            # Do not mine description text for trailing numbers when the alias
+            # was previously seen with an explicit POR marker.  Continuation
+            # rows (empty MRP cell) would otherwise harvest values like "RAL
+            # 4005"색 color-codes or specification suffixes as fake prices.
+            alias_is_por = bool(alias and alias in por_aliases) or bool(
+                particulars_alias and particulars_alias in por_aliases
+            )
             if (
                 purchase is None
                 and (alias or particulars_alias)
                 and can_salvage_trailing_text_price
+                and not alias_is_por
                 and (particulars_raw or between_raw)
             ):
                 for candidate_text in (particulars_raw, between_raw):

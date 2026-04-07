@@ -182,6 +182,14 @@ The extractor currently handles these generic table patterns:
 46. Strong alias expansion now requires digit-dense code shapes (>=3 digits), preventing descriptive blends like `IP43MIVAN` from being emitted as aliases
 47. Spaced Cat.Nos with suffix letters preserve the suffix even when OCR inserts a gap before it (for example `5078 86 N` -> `507886N`), and mapped continuation rows use that full alias for pairing
 48. Multiline split numeric aliases are rejoined (for example `5` + `078 60` -> `507860`), and shorter suffix fragments (for example `07860`) are suppressed when the full mapped alias exists
+49. In shifted mapped rows where the purchase cell is blank but the mapped pack cell contains inline `MRP pack` (for example `8854 1/10/100`), extraction recovers MRP from that pack cell and keeps the trailing slash token as pack
+50. Stream spread-row fallback now stops at intervening alias cells, so a stale/gutter alias on the left cannot steal the later price of a new item that starts in the real alias column on the same row
+51. Stream spread-row fallback now treats no-price markers in the MRP position (for example `n`, `NA`, `-`, `■`) as explicit “MRP unavailable”, so trailing pack values (for example `50`) are not exported as purchase
+52. In header-mapped rows, numeric Cat.Nos in the alias column are treated as strong alias evidence and are not overridden by leading description tokens from particulars (prevents `IP66/IK09` replacing `088061`)
+53. Alias validation rejects IP/IK spec tokens (for example `IP66/IK09`) and dimension descriptors (for example `50X80/130/180`) so description text cannot be emitted as aliases
+54. Alias validation rejects collapsed section-heading + voltage tokens (for example `DOUBLEPOLE415V`, `FOURPOLE415V`), so family labels do not leak into extracted Cat.Nos
+55. Alias validation rejects electrical rating descriptors (for example `5-300W/75W`, `60TO400W`) so specs in particulars cannot leak into alias output
+56. Alias validation rejects prefixed repeated-dimension descriptors (for example `JB150X150X65-90`, `JBFLY225X225X65-90`) so size/configuration codes in particulars do not replace mapped Cat.Nos like `689610`
 
 This also covers mixed rows where several Cat.Nos are listed first but only the last one or two have visible MRP values (for example some variants are price-on-request while later variants have explicit MRP).
 

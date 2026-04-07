@@ -111,6 +111,39 @@ def test_sample_4_page_29_skips_when_purchase_column_empty(tmp_path: Path) -> No
     assert aliases == []
 
 
+def test_main_price_list_page_339_skips_rows_when_mrp_unavailable(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_p339.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 339, out_xlsx)
+    aliases = _read_aliases(out_xlsx)
+
+    # Page 339 has rows where mapped MRP cell contains an unavailable marker
+    # and only pack values are numeric. Those rows must not be extracted.
+    assert aliases == []
+
+
+def test_main_price_list_page_311_uses_catno_not_ipik_description(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_p311.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 311, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+
+    assert ("088061", 27291.0) in row_set
+    assert ("088064", 32052.0) in row_set
+    assert not any(alias == "IP66/IK09" for alias, _ in rows)
+
+
+def test_main_price_list_page_322_skips_dimension_text_as_alias(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_p322.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 322, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_set = {(alias, purchase) for alias, purchase in rows}
+
+    assert ("075661", 576.0) in row_set
+    assert ("075666", 373.0) in row_set
+    assert not any(alias == "50X80/130/180" for alias, _ in rows)
+    assert not any(alias == "50X80/130/145/180" for alias, _ in rows)
+
+
 def test_sample_4_page_31_skips_description_numeric_false_purchase(tmp_path: Path) -> None:
     out_xlsx = tmp_path / "sample_4_p31.xlsx"
     _extract_target_page(ROOT / "samples" / "sample_4.pdf", 31, out_xlsx)
@@ -413,6 +446,27 @@ def test_main_price_list_page_237_prefers_inline_mrp_over_pack_suffix(tmp_path: 
     assert row_dict.get("679455") == 1738.0
     assert row_dict.get("679454") == 2636.0
     assert row_dict.get("679470") == 2083.0
+
+
+def test_main_price_list_page_238_recovers_shifted_mrp_pack_rows(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p238.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 238, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("679497") == 8854.0
+    assert row_dict.get("679498") == 3544.0
+
+
+def test_main_price_list_page_241_prefers_row_local_purchase_column_value(tmp_path: Path) -> None:
+    out_xlsx = tmp_path / "main_price_list_2026_p241.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 241, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("673302") == 100.0
+    assert ("673302", 114.0) not in rows
+    assert row_dict.get("673303") == 114.0
 
 
 def test_main_price_list_page_235_keeps_shifted_audio_video_rows(tmp_path: Path) -> None:
@@ -882,3 +936,51 @@ def test_main_price_list_page_166_extracts_split_description_aliases(tmp_path: P
     assert row_dict.get("AA27108MT") == 4532.0
     # Garbage row guard: MRP value must not appear as its own alias
     assert "13318" not in row_dict, "MRP 13318 must not be emitted as an alias"
+
+
+def test_main_price_list_page_112_skips_collapsed_voltage_heading_alias(tmp_path: Path) -> None:
+    """Collapsed section headings like DOUBLEPOLE415V must not be emitted as aliases."""
+    out_xlsx = tmp_path / "main_price_list_2026_p112.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 112, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("408621") == 1999.0
+    assert row_dict.get("408633") == 1472.0
+    assert "DOUBLEPOLE415V" not in row_dict
+    assert "OUBLEPOLE415V" not in row_dict
+
+
+def test_main_price_list_page_113_skips_collapsed_voltage_heading_alias(tmp_path: Path) -> None:
+    """Collapsed heading+voltage labels should not appear as extracted Cat.Nos."""
+    out_xlsx = tmp_path / "main_price_list_2026_p113.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 113, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("408684") == 3687.0
+    assert row_dict.get("408758") == 2461.0
+    assert "FOURPOLE415V" not in row_dict
+
+
+def test_main_price_list_page_158_skips_rated_power_text_alias(tmp_path: Path) -> None:
+    """Power-rating text tokens should not be emitted as aliases."""
+    out_xlsx = tmp_path / "main_price_list_2026_p158.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 158, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("AC24107MB") == 21782.0
+    assert "5-300W/75W" not in row_dict
+
+
+def test_main_price_list_page_309_prefers_mapped_catno_over_description_code(tmp_path: Path) -> None:
+    """Description codes like JB150X150X65-90 must not override mapped Cat.Nos."""
+    out_xlsx = tmp_path / "main_price_list_2026_p309.xlsx"
+    _extract_target_page(ROOT / "samples" / "main-price-list-2026.pdf", 309, out_xlsx)
+    rows = _read_alias_purchase(out_xlsx)
+    row_dict = {alias: purchase for alias, purchase in rows}
+
+    assert row_dict.get("689610") == 3580.0
+    assert row_dict.get("689611") == 4429.0
+    assert "JB150X150X65-90" not in row_dict

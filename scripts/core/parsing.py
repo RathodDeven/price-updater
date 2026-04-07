@@ -16,6 +16,17 @@ from core.models import (
 
 NON_ALIAS_POLE_PATTERN = re.compile(r"^\d+(?:[\-\s]?(?:P|POLE|POLES))$", re.IGNORECASE)
 NON_ALIAS_IP_RATING_PATTERN = re.compile(r"^IP\d{1,2}$", re.IGNORECASE)
+NON_ALIAS_IP_IK_PATTERN = re.compile(r"^IP\d{1,3}(?:/IK\d{1,3})?$", re.IGNORECASE)
+NON_ALIAS_DIMENSION_PATTERN = re.compile(r"^\d{1,4}X\d{1,4}(?:/\d{1,4})+$", re.IGNORECASE)
+NON_ALIAS_PREFIXED_DIMENSION_PATTERN = re.compile(
+    r"^[A-Za-z]{1,12}\d{2,4}X\d{2,4}(?:X\d{2,4})+(?:-\d{2,4})?$",
+    re.IGNORECASE,
+)
+NON_ALIAS_COLLAPSED_VOLTAGE_HEADING_PATTERN = re.compile(r"^[A-Za-z]{5,}\d{2,4}(?:V|KV)$", re.IGNORECASE)
+NON_ALIAS_RATING_DESCRIPTOR_PATTERN = re.compile(
+    r"^\d+(?:\.\d+)?(?:\s*(?:TO|[-–—/])\s*\d+(?:\.\d+)?(?:\s*(?:MA|A|V|KV|W|KW|MW|VA|KVA|HZ))?)+\s*(?:MA|A|V|KV|W|KW|MW|VA|KVA|HZ)?$",
+    re.IGNORECASE,
+)
 TRAILING_ALIAS_FOOTNOTE_PATTERN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9\-_/\.]*?)([0-9\u00B9\u00B2\u00B3\u2070-\u2079])\)\s*$")
 NUMERIC_ALIAS_PATTERN = re.compile(r"^\d{5,12}$")
 
@@ -232,6 +243,22 @@ def looks_like_alias(value: str, allow_numeric: bool = False) -> bool:
         return False
     # Reject IP protection ratings (IP20, IP54, etc.)
     if NON_ALIAS_IP_RATING_PATTERN.match(value):
+        return False
+    # Reject IP/IK protection class tokens such as IP66/IK09.
+    if NON_ALIAS_IP_IK_PATTERN.match(value):
+        return False
+    # Reject dimension-ratio descriptors such as 50X80/130/180.
+    if NON_ALIAS_DIMENSION_PATTERN.match(value):
+        return False
+    # Reject prefixed dimension descriptors such as JB150X150X65-90.
+    if NON_ALIAS_PREFIXED_DIMENSION_PATTERN.match(value):
+        return False
+    # Reject collapsed section headings such as DOUBLEPOLE415V where a
+    # family label and voltage rating are merged without spaces.
+    if NON_ALIAS_COLLAPSED_VOLTAGE_HEADING_PATTERN.match(value):
+        return False
+    # Reject electrical rating descriptors such as 5-300W/75W.
+    if NON_ALIAS_RATING_DESCRIPTOR_PATTERN.match(value):
         return False
     # Reject numeric ranges (e.g., "1 to 1.6", "2.5-4") that are electrical ratings
     if NON_ALIAS_RANGE_PATTERN.match(value):

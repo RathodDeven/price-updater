@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import re
+
 from core.models import NormalizedRow
 from core.quality_scoring import normalized_row_quality
+
+
+# Pattern to detect numeric-only product codes/aliases (cross-references).
+# Matches patterns like 689678, 089604, etc. - suspiciously alias-like purchases
+# that often leak from selection/comparison tables.
+ALIAS_LIKE_PURCHASE_PATTERN = re.compile(r"^\d{5,12}$")
 
 
 # Common electrical current ratings that often leak into purchase by mistake.
@@ -54,6 +62,26 @@ def _is_current_like_purchase(value: float) -> bool:
     return round(float(value), 2) in CURRENT_LIKE_PURCHASES
 
 
+def _purchase_looks_like_code(value: float, all_aliases: set[str]) -> bool:
+    """Check if purchase value looks like a product code/cross-reference (not a price).
+    
+    A purchase is considered code-like if:
+    1. It's numeric-only with 5-12 digits (alias-like form), AND
+    2. It actually appears as an alias elsewhere in the extracted data
+    
+    This prevents legitimate prices (e.g., 10541) from being filtered while catching
+    cross-references that leak from selection/comparison tables (e.g., 689678).
+    """
+    try:
+        purchase_str = str(int(value))
+        if not ALIAS_LIKE_PURCHASE_PATTERN.match(purchase_str):
+            return False
+        # Only treat as code-like if this value actually appears as an alias in the data
+        return purchase_str in all_aliases
+    except (ValueError, TypeError, OverflowError):
+        return False
+
+
 def deduplicate_rows(rows: list[NormalizedRow]) -> list[NormalizedRow]:
     """Remove duplicate rows using two-layer deduplication strategy.
     
@@ -68,6 +96,9 @@ def deduplicate_rows(rows: list[NormalizedRow]) -> list[NormalizedRow]:
     
     This enforces the business rule: alias values are globally unique identifiers.
     """
+    # Collect all aliases for cross-reference detection
+    all_aliases = {row.alias for row in rows}
+    
     # Layer 1: Deduplicate by (alias, purchase) key
     best_by_key: dict[tuple[str, float], NormalizedRow] = {}
     for row in rows:
@@ -107,6 +138,13 @@ def deduplicate_rows(rows: list[NormalizedRow]) -> list[NormalizedRow]:
         # If alias has both current-like and non-current-like purchases,
         # prefer non-current-like candidates (current leakage safeguard).
         pool = non_current_like if non_current_like else candidates
+
+        # Cross-table pollution safeguard: reject purchases that look like product codes/aliases.
+        # These often leak from selection/comparison tables (e.g., 689678 is a cross-reference,
+        # not a price). If we have both code-like and real prices, strongly prefer real prices.
+        non_code_like = [r for r in pool if not _purchase_looks_like_code(r.purchase, all_aliases)]
+        if non_code_like:
+            pool = non_code_like
 
         # Description-suffix leakage often produces a small competing numeric
         # value (e.g. 75) alongside a true MRP in the same alias group.

@@ -36,14 +36,21 @@ Repository agent rules for `price-updater`.
 ## Parsing Quality Rules
 - Prefer full-match numeric parsing for prices.
 - Prevent unit values (for example current/voltage forms) from becoming aliases.
+- Collapsed heading+voltage tokens (for example `DOUBLEPOLE415V`, `FOURPOLE415V`) are section labels, not product codes.
+- Power-rating descriptors (for example `5-300W/75W`, `60TO400W`) are specification text, not product codes.
+- When alias column has strong Cat.No evidence, do not override it with a leading particulars/description token just because the particulars token is more digit-dense (for example `689610` must beat `JB150X150X65-90`).
 - Prefer pack columns with pack-like evidence (slash forms, repeated pack tokens) over nearby numeric-only columns.
 - When multiple candidates map to the same `(alias, purchase)`, keep the higher-quality row.
 - In stacked cells containing Cat.No + intermediate values + MRP (e.g. `4166 86\n18\n25\n4430`), take the LAST valid price (≥ MIN_PURCHASE), not the first — intermediate values are current ratings, not MRP.
 - Alias group regex must use `[ \t]` (horizontal whitespace), NOT `\s`, to avoid cross-line matching that creates garbage aliases from adjacent lines (e.g. `7000\n4240` → `70004240`).
 - Alias-group detection for spaced numeric Cat.Nos must require token boundaries (for example `\b\d{3,6}[ \t]\d{2,6}\b`) so partial groups inside alphanumeric aliases (e.g. `5757 12PL`) are not truncated to numeric-only aliases (`575712`).
-- When a cell contains a price-on-request marker (■/`\uf06e`/`\u25a0`), treat MRP as unavailable and skip the row.
+- When a cell contains a price-on-request marker (■/`\uf06e`/`\u25a0`) **or a standalone lowercase `n`** (as used in LCS³ cabling catalogs, per footnote "n Price available on request"), treat MRP as unavailable and skip the row.
+- When an alias row is skipped due to a POR marker, record the alias in `por_aliases` so that continuation rows for the same alias (which may have an *empty* MRP cell) cannot fall through to description-text trailing-number salvage (e.g. a RAL color code "4005" in "Violet RAL 4005" must not become the purchase price).
+- In spread-row fallback parsing, if a no-price marker appears in the candidate MRP position (for example `n`, `NA`, `-`, `■`), stop price recovery for that row and do not consume trailing pack numerics as purchase.
 - In mixed-layout cells, do not accept the concatenated text as an alias when no individual token qualifies — prevents description text becoming aliases.
 - IP protection ratings (IP20, IP54, etc.) are not product codes.
+- IP/IK protection-class tokens (for example `IP66/IK09`) are specification text, not product codes.
+- Dimension descriptors (for example `50X80/130/180`, `50X80/130/145/180`) are size/configuration text, not product codes.
 - Column-role mapping from detected headers remains the primary extraction path. Value-shape heuristics are validation guardrails, not substitutes for header/position-based mapping, because merged cells, shifted rows, inherited mappings, and fallback parsers can still surface non-alias text from outside the ideal alias column.
 - Numeric ranges like "1 to 1.6", "2.5 to 4", "6-10" are electrical ratings, not product codes. Reject them as aliases during validation using `NON_ALIAS_RANGE_PATTERN` as a generic backstop when such values leak from rated-current columns or mixed cells.
 - Fuzzy header matching must penalize very short normalized headers (< 3 chars) to prevent `(A)` → `"a"` from matching `"purchase"` or `"rate"` at 100%.
@@ -74,6 +81,7 @@ Repository agent rules for `price-updater`.
 - When recovering MRP from the end of particulars/description text, only accept a standalone trailing numeric token (e.g. `..., 32970`), not digits embedded inside a product code suffix (e.g. `5ST3070`).
 - In mapped rows where purchase cell is pack-like (`1`, `5/10`, etc.) and alias is valid, check particulars/intermediate between-columns for a trailing standalone price and prefer it as MRP; treat purchase-cell token as shifted pack.
 - In mapped purchase cells that inline MRP and pack in one token stream (for example `2220 1/10/100`), parse the leading numeric token as MRP and treat the trailing slash token as pack, instead of dropping the row.
+- In shifted mapped rows where purchase column is blank but mapped pack column contains inline `MRP pack` (for example `8854 1/10/100`), recover MRP from that pack cell and keep trailing slash token as pack.
 - When mapped purchase is blank but particulars/intermediate text ends with inline `MRP pack` (for example `... 1736 1/20/200`), prefer the inline MRP (`1736`) before trailing-number fallback so pack suffix (`200`) is not misclassified as purchase.
 - Nearby-column MRP recovery (when mapped purchase cell is blank) must only consider purchase-header-evidenced columns near alias, and should ignore candidates that are only current-like values.
 - Nearby-column MRP recovery must stay on the same side of the alias as the mapped purchase column (right-side alias blocks must not borrow MRP from left-side parallel tables, and vice versa).
@@ -86,6 +94,7 @@ Repository agent rules for `price-updater`.
 - If a mapped purchase cell is blank while a separate pack column is populated, do not infer MRP from trailing description numerics by default; values like `Pack consisting of 100` are pack/quantity text, not price.
 - When emitting multiple aliases from one mapped multiline alias cell, only emit extra line-level aliases that are strong catalog-code candidates; configuration text like `2 NO`, `2 NC`, `4 NO`, `1 NC` must not become aliases.
 - Stream fallback must handle shifted adjacent-cell pairs where an alias appears at the tail of one cell and the MRP appears at the head of the next cell (for example `... 0261 23` then `86160`) so right-block aliases are not dropped or mispaired to previous MRPs.
+- In stream spread-row fallback, if another alias cell appears before the candidate price cell, treat it as a new item boundary and do not let the earlier stale/gutter alias claim that later price.
 - Stream alias-group normalization must apply numeric footnote cleanup for spaced Cat.Nos groups (for example `4122 831` -> `412283`) to prevent flattened superscript markers from producing synthetic aliases like `4122831`.
 - Strong alias salvage must reject descriptive word-number tokens (for example `SOCKET-3`, `WAY-1`, `MODULE-2`) so continuation description fragments with adjacent MRPs cannot be promoted to aliases.
 - Strong alias candidates must be digit-dense (>=3 digits) so mixed description blends like `IP43MIVAN` are not emitted as aliases.
@@ -208,3 +217,37 @@ If a file approaches 400 lines (or starts mixing concerns):
 - Verify row counts match pre-refactor baselines
 - Check zero Pylance errors: `pylance check scripts/`
 - Profile impact of new modules on load time (should be negligible)
+
+## Recent Fixes
+
+### Page 310 Cross-Reference Table Pollution (Dedup Fix)
+**Issue**: Selection/comparison tables on page 310 table 0 had product cross-references (e.g., `689678`) in the purchase column. The normalization extracted these as "prices" for unrelated aliases (689638→689678, 689634→689678, etc.), shadowing correct pairs from the same aliases in actual price tables.
+
+**Root Cause**: Table 0 on page 310 is a comparison matrix showing product variants and their cross-references using catalog codes instead of prices. Fallback parsers correctly extracted the aliases but incorrectly used cross-reference numbers as purchase values. Dedup layer 2 (alias uniqueness) then had to choose between multiple prices per alias, but the scoring favored the code-like values.
+
+**Solution**: Added cross-table pollution safeguard in dedup layer 2: when an alias has both a purchase value that (a) looks like a product code (numeric-only, 5-12 digits) AND (b) actually appears as an alias elsewhere in the data, reject it in favor of real prices. This filters out 689678-like values while preserving legitimate 5-digit prices (e.g., 10541) that don't also appear as aliases.
+
+**Result**: Page 310 fixed - all 5 affected aliases now show correct prices:
+- 689638 → 6141 ✓
+- 689634 → 9612 ✓
+- 689645 → 10541 ✓
+- 089604 → 7917 ✓
+- 088073 → 11683 ✓
+
+
+## Recent Fixes
+
+### Page 310 Cross-Reference Table Pollution (Dedup Fix)
+**Issue**: Selection/comparison tables on page 310 table 0 had product cross-references (e.g., `689678`) in the purchase column. The normalization extracted these as "prices" for unrelated aliases (689638→689678, 689634→689678, etc.), shadowing correct pairs from the same aliases in actual price tables.
+
+**Root Cause**: Table 0 on page 310 is a comparison matrix showing product variants and their cross-references using catalog codes instead of prices. Fallback parsers correctly extracted the aliases but incorrectly used cross-reference numbers as purchase values. Dedup layer 2 (alias uniqueness) then had to choose between multiple prices per alias, but the scoring favored the code-like values.
+
+**Solution**: Added cross-table pollution safeguard in dedup layer 2: when an alias has both a purchase value that (a) looks like a product code (numeric-only, 5-12 digits) AND (b) actually appears as an alias elsewhere in the data, reject it in favor of real prices. This filters out 689678-like values while preserving legitimate 5-digit prices (e.g., 10541) that don't also appear as aliases.
+
+**Result**: Page 310 fixed - all 5 affected aliases now show correct prices:
+- 689638 → 6141 ✓
+- 689634 → 9612 ✓
+- 689645 → 10541 ✓
+- 089604 → 7917 ✓
+- 088073 → 11683 ✓
+
